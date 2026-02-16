@@ -242,13 +242,13 @@ cp target/GhidraMCP-1.5.0.zip "<ghidra_install>/Extensions/"
 ### Python Bridge Setup
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+uv sync --frozen
 
 # Run MCP bridge
-python bridge_mcp_ghidra.py
+uv run python bridge_mcp_ghidra.py
 
 # Or with custom server URL
-python bridge_mcp_ghidra.py --ghidra-server http://127.0.0.1:8089/
+uv run python bridge_mcp_ghidra.py --ghidra-server http://127.0.0.1:8089/
 ```
 
 ## Compatibility

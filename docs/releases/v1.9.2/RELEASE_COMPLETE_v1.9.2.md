@@ -66,8 +66,8 @@ Ghidra MCP Server **v1.9.2** has been successfully prepared for production relea
 │   └── START_HERE.md - Quick navigation
 ├── 🔧 Build Configuration (4 files)
 │   ├── pom.xml - Maven build (v1.9.2)
-│   ├── requirements.txt - Python dependencies
-│   ├── requirements-test.txt - Test dependencies
+│   ├── pyproject.toml - Python dependencies and project metadata
+│   ├── uv.lock - Locked Python dependencies for uv
 │   └── pytest.ini - Test configuration
 ├── 📊 Data Files (8 files)
 ├── 📚 Documentation (docs/ directory - 60+ files)
@@ -181,7 +181,7 @@ mvn clean package assembly:single
 cp target/GhidraMCP-1.9.2.zip $GHIDRA_INSTALL/Extensions/Ghidra/
 
 # 5. Install Python dependencies
-pip install -r requirements.txt
+uv sync --frozen
 
 # 6. Restart Ghidra and enable plugin
 # CodeBrowser → File → Configure... → Configure All Plugins → GhidraMCP ✅

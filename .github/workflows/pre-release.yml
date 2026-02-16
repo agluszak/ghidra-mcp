@@ -129,7 +129,8 @@ jobs:
         
         # Copy essential files
         cp bridge_mcp_ghidra.py release/
-        cp requirements.txt release/
+        cp pyproject.toml release/
+        cp uv.lock release/
         cp README.md release/
         [ -f LICENSE ] && cp LICENSE release/
         
@@ -164,8 +165,8 @@ jobs:
         Same as stable releases:
         1. Extract to Ghidra's Extensions/Ghidra/ directory
         2. Restart Ghidra and enable plugin
-        3. Install dependencies: \`pip install -r requirements.txt\`
-        4. Run: \`python bridge_mcp_ghidra.py\`
+        3. Install dependencies: \`uv sync --frozen\`
+        4. Run: \`uv run python bridge_mcp_ghidra.py\`
         
         EOF
         

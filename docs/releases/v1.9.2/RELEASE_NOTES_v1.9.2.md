@@ -35,7 +35,7 @@ Version 1.9.2 represents a major **documentation and organization milestone** fo
 
 **Organized 40+ root-level files:**
 - Core files (README, CHANGELOG, LICENSE, etc.)
-- Build configuration (pom.xml, requirements.txt)
+- Build configuration (pom.xml, pyproject.toml)
 - Data files (DLL exports, JSON configurations)
 - Documentation (docs/ directory)
 - Scripts (scripts/ directory with categories)
@@ -178,7 +178,7 @@ mvn clean package assembly:single
 cp target/GhidraMCP-1.9.2.zip $GHIDRA_INSTALL/Extensions/Ghidra/
 
 # Install Python bridge
-pip install -r requirements.txt
+uv sync --frozen
 ```
 
 ### Upgrade from 1.8.x

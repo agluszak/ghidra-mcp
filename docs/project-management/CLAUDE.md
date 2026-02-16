@@ -58,7 +58,7 @@ Ghidra MCP Server is a production-ready Model Context Protocol (MCP) server that
 .\ghidra-mcp-setup.ps1 -SetupDeps -GhidraPath "C:\path\to\ghidra"
 
 # 2. Install Python dependencies
-pip install -r requirements.txt
+uv sync --group dev
 
 # 3. Build the Java plugin
 mvn clean package assembly:single
@@ -351,8 +351,8 @@ For detailed implementation information, see `MAVEN_VERSION_MANAGEMENT.md`.
 - `.env.template` - Environment variables template (copy to `.env` for local config)
 - `mcp-config.json` - Claude MCP configuration template
 - `pytest.ini` - Test configuration with markers and coverage settings
-- `requirements.txt` - Production dependencies (mcp, requests, fastmcp)
-- `requirements-test.txt` - Test dependencies
+- `pyproject.toml` - Python project metadata and dependency groups
+- `uv.lock` - Locked Python dependencies for reproducible uv environments
 
 ### Documentation Structure
 

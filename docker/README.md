@@ -107,14 +107,14 @@ The headless server exposes the same REST API as the GUI plugin. Currently imple
 ### Run Integration Tests
 
 ```bash
-# Install test requirements
-pip install -r tests/requirements.txt
+# Install test dependencies
+uv sync --group test
 
 # Run tests against local server
-python tests/run_tests.py --integration --server http://localhost:8089
+uv run python tests/run_tests.py --integration --server http://localhost:8089
 
 # Run all tests with verbose output
-python tests/run_tests.py --all -v
+uv run python tests/run_tests.py --all -v
 ```
 
 ### Test Endpoint Coverage

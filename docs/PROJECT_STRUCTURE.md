@@ -12,8 +12,8 @@ ghidra-mcp/
 │   ├── bridge_mcp_ghidra.py          # Main MCP server entry point
 │   ├── mcp-config.json                # MCP server configuration
 │   ├── pom.xml                        # Maven build configuration
-│   ├── requirements.txt               # Python dependencies
-│   ├── requirements-test.txt          # Test dependencies
+│   ├── pyproject.toml                 # Python dependencies and project metadata
+│   ├── uv.lock                        # Locked Python dependencies for uv
 │   ├── pytest.ini                     # Pytest configuration
 │   └── README.md                      # Project overview
 │

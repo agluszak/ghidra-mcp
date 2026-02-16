@@ -38,7 +38,8 @@ A production-ready Model Context Protocol (MCP) server that bridges Ghidra's pow
 - **Java 21 LTS** (OpenJDK recommended)
 - **Apache Maven 3.9+**
 - **Ghidra 12.0.2** (or compatible version)
-- **Python 3.8+** with pip
+- **Python 3.10+**
+- **uv** (recommended Python package/dependency manager)
 
 ### Installation
 
@@ -46,7 +47,7 @@ A production-ready Model Context Protocol (MCP) server that bridges Ghidra's pow
 > It handles prerequisite setup + build + deployment in one command.
 >
 > **Important:** `-SetupDeps` installs Maven/Ghidra JAR dependencies only.
-> `-Deploy` is the end-user command and (by default) also ensures Python requirements before build/deploy.
+> `-Deploy` is the end-user command and (by default) also ensures Python dependencies before build/deploy.
 
 1. **Clone the repository:**
    ```bash
@@ -54,30 +55,35 @@ A production-ready Model Context Protocol (MCP) server that bridges Ghidra's pow
    cd ghidra-mcp
    ```
 
-2. **Recommended: run environment preflight first:**
+2. **Install Python dependencies (uv):**
+   ```bash
+   uv sync --group dev
+   ```
+
+3. **Recommended: run environment preflight first:**
    ```powershell
    .\ghidra-mcp-setup.ps1 -Preflight -GhidraPath "C:\ghidra_12.0.2_PUBLIC"
    ```
 
-3. **Build and deploy to Ghidra (single command):**
+4. **Build and deploy to Ghidra (single command):**
    ```powershell
    .\ghidra-mcp-setup.ps1 -Deploy -GhidraPath "C:\ghidra_12.0.2_PUBLIC"
    ```
 
-4. **Optional strict/manual mode** (advanced):
+5. **Optional strict/manual mode** (advanced):
    ```powershell
    # Skip automatic prerequisite setup
    .\ghidra-mcp-setup.ps1 -Deploy -NoAutoPrereqs -GhidraPath "C:\ghidra_12.0.2_PUBLIC"
    ```
 
-5. **Show script help**:
+6. **Show script help**:
    ```powershell
    .\ghidra-mcp-setup.ps1 -Help
    # or
    Get-Help .\ghidra-mcp-setup.ps1 -Detailed
    ```
 
-6. **Optional build-only mode** (advanced/troubleshooting):
+7. **Optional build-only mode** (advanced/troubleshooting):
    ```powershell
    # Preferred: script-managed build-only
    .\ghidra-mcp-setup.ps1 -BuildOnly
@@ -92,12 +98,12 @@ A production-ready Model Context Protocol (MCP) server that bridges Ghidra's pow
 
 #### Option 1: Stdio Transport (Recommended for AI tools)
 ```bash
-python bridge_mcp_ghidra.py
+uv run python bridge_mcp_ghidra.py
 ```
 
 #### Option 2: SSE Transport (Web/HTTP clients)
 ```bash
-python bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
+uv run python bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
 ```
 
 #### In Ghidra

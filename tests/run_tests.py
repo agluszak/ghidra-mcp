@@ -155,7 +155,7 @@ def main():
         return pytest.main(pytest_args)
     except ImportError:
         print("ERROR: pytest not installed")
-        print("Install with: pip install pytest pytest-html requests")
+        print("Install with: uv sync --group test")
         return 1
 
 

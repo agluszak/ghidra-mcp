@@ -381,7 +381,8 @@ pytest tests/ -v
 ### Prerequisites
 - Java 21 LTS
 - Apache Maven 3.9+
-- Python 3.8+
+- Python 3.10+
+- uv
 - Ghidra 12.0.2
 
 ### Local Development
@@ -396,16 +397,15 @@ cd ghidra-mcp
 # 3. Build plugin
 mvn clean package
 
-# 4. Install Python dependencies
-pip install -r requirements.txt
-pip install -r requirements-test.txt
+# 4. Install Python dependencies (uv)
+uv sync --group dev
 
 # 5. Run MCP server
-python bridge_mcp_ghidra.py
+uv run python bridge_mcp_ghidra.py
 
 # 6. Run tests
 mvn test
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ### Building Documentation

@@ -67,10 +67,10 @@ python tools/scan_undocumented_functions.py
 ## 🔧 Requirements
 
 All tools require:
-- Python 3.8+
+- Python 3.10+
 - Ghidra MCP Server running (port 8089)
 - Binary loaded in Ghidra CodeBrowser
-- Python dependencies from `requirements.txt`
+- Python dependencies from `pyproject.toml` (install with `uv sync --group dev`)
 
 ## 🚀 Workflow Integration
 

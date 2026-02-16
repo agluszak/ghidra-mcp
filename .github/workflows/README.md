@@ -100,7 +100,7 @@ This directory contains GitHub Actions workflows for automated building, testing
 Each release includes:
 - **`GhidraMCP-{version}.zip`** - Main Ghidra plugin
 - **`bridge_mcp_ghidra.py`** - MCP server with 57 tools
-- **`requirements.txt`** - Python dependencies
+- **`pyproject.toml`** and **`uv.lock`** - Python dependencies
 - **`README.md`** - Complete project documentation
 - **`INSTALLATION.md`** - Quick installation guide
 - **`LICENSE`** - License file (if present)

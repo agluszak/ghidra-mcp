@@ -136,7 +136,8 @@ jobs:
         
         # Copy essential files
         cp bridge_mcp_ghidra.py release/
-        cp requirements.txt release/
+        cp pyproject.toml release/
+        cp uv.lock release/
         cp README.md release/
         [ -f LICENSE ] && cp LICENSE release/
         
@@ -147,8 +148,8 @@ jobs:
         ## Quick Start
         1. Extract GhidraMCP-${VERSION}.zip to Ghidra's Extensions/Ghidra/ directory
         2. Restart Ghidra and enable the plugin
-        3. Install Python dependencies: \`pip install -r requirements.txt\`
-        4. Run: \`python bridge_mcp_ghidra.py\`
+        3. Install Python dependencies: \`uv sync --frozen\`
+        4. Run: \`uv run python bridge_mcp_ghidra.py\`
         
         ## Features
         - 57 MCP tools for comprehensive binary analysis
@@ -193,14 +194,14 @@ jobs:
         
         - GhidraMCP-${VERSION}.zip - Main Ghidra plugin
         - bridge_mcp_ghidra.py - MCP server with 57 tools
-        - requirements.txt - Python dependencies
+        - pyproject.toml + uv.lock - Python dependencies
         - Complete documentation and installation guide
         
         ## 🔧 Technical Details
         
         - **Java:** 21 LTS
         - **Ghidra:** 12.0.2 compatible
-        - **Python:** 3.8+ required
+        - **Python:** 3.10+ required
         - **Tests:** All 158 tests passing
         
         ## Recent Changes

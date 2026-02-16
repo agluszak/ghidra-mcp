@@ -72,7 +72,7 @@ Enhanced scripts documentation with:
 **Analyzed and categorized all root-level files**:
 
 - **Core Files** (8) - Stay in root
-  - bridge_mcp_ghidra.py, pom.xml, requirements.txt, etc.
+  - bridge_mcp_ghidra.py, pom.xml, pyproject.toml, uv.lock, etc.
   
 - **Build & Deployment** (4) - Stay in root
   - ghidra-mcp-setup.ps1 (supports setup/build/deploy actions), etc.

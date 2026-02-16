@@ -263,6 +263,7 @@ replay_pid*
 *.gpr
 *.rep/
 *.lock
+!uv.lock
 
 # Ghidra analysis files
 *.gzf

@@ -164,7 +164,7 @@
 - Version consistency verification across all files
 - Build configuration validated (Maven 3.9+, Java 21)
 - Plugin deployment verified with Ghidra 11.4.2
-- Python dependencies current (requirements.txt)
+- Python dependencies current (pyproject.toml + uv.lock)
 - All core functionality tested and working
 
 #### ✅ Quality Metrics

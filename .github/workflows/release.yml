@@ -131,8 +131,9 @@ jobs:
         # Copy Python MCP bridge
         cp bridge_mcp_ghidra.py release/
         
-        # Copy requirements files
-        cp requirements.txt release/
+        # Copy Python project metadata
+        cp pyproject.toml release/
+        cp uv.lock release/
         
         # Copy installation script
         cp copy-ghidra-libs.bat release/ 2>/dev/null || echo "copy-ghidra-libs.bat not found, skipping"
@@ -153,19 +154,20 @@ jobs:
         
         2. **Install Python Dependencies:**
            ```bash
-           pip install -r requirements.txt
+           uv sync --frozen
            ```
         
         3. **Run the MCP Server:**
            ```bash
-           python bridge_mcp_ghidra.py
+           uv run python bridge_mcp_ghidra.py
            ```
         
         ## What's Included
         
         - `GhidraMCP-${{ steps.version.outputs.VERSION }}.zip` - Main Ghidra plugin
         - `bridge_mcp_ghidra.py` - MCP server with 110 tools
-        - `requirements.txt` - Python dependencies
+        - `pyproject.toml` - Python dependency specification
+        - `uv.lock` - Reproducible dependency lockfile
         - `README.md` - Complete documentation
         - `INSTALLATION.md` - This installation guide
         
@@ -214,14 +216,14 @@ jobs:
         1. Download `GhidraMCP-${{ steps.version.outputs.VERSION }}.zip`
         2. Extract to Ghidra's `Extensions/Ghidra/` directory
         3. Restart Ghidra and enable the plugin
-        4. Install Python dependencies: `pip install -r requirements.txt`
-        5. Run MCP server: `python bridge_mcp_ghidra.py`
+        4. Install Python dependencies: `uv sync --frozen`
+        5. Run MCP server: `uv run python bridge_mcp_ghidra.py`
         
         ## 🔧 Technical Specifications
         
         - **Java Version:** Java 21 LTS
         - **Ghidra Version:** 12.0.2 (compatible)
-        - **Python Version:** 3.8+ required
+        - **Python Version:** 3.10+ required
         - **Package:** com.xebyte.GhidraMCP
         - **License:** Apache 2.0
         
@@ -281,7 +283,8 @@ jobs:
         files: |
           release/GhidraMCP-${{ steps.version.outputs.VERSION }}.zip
           release/bridge_mcp_ghidra.py
-          release/requirements.txt
+          release/pyproject.toml
+          release/uv.lock
           release/README.md
           release/INSTALLATION.md
           release/copy-ghidra-libs.bat
@@ -308,7 +311,7 @@ jobs:
         echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
         echo "- **Plugin:** GhidraMCP-${{ steps.version.outputs.VERSION }}.zip" >> $GITHUB_STEP_SUMMARY
         echo "- **MCP Server:** bridge_mcp_ghidra.py (57 tools)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Dependencies:** requirements.txt" >> $GITHUB_STEP_SUMMARY
+        echo "- **Dependencies:** pyproject.toml + uv.lock" >> $GITHUB_STEP_SUMMARY
         echo "- **Documentation:** README.md, INSTALLATION.md" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔗 Links" >> $GITHUB_STEP_SUMMARY
