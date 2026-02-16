@@ -11,6 +11,7 @@ import argparse
 import logging
 import time
 import re
+import json
 from urllib.parse import urljoin, urlparse
 
 from mcp.server.fastmcp import FastMCP
@@ -576,6 +577,34 @@ def _convert_escaped_newlines(text: str) -> str:
     return text.replace("\\n", "\n")
 
 
+def parse_json_value(value: str, context: str) -> object:
+    """Parse JSON with consistent error handling and actionable messages."""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise GhidraValidationError(
+            f"Invalid JSON for {context}: {exc.msg} at line {exc.lineno} column {exc.colno}"
+        ) from exc
+
+
+def pretty_json_or_raw(value: str) -> str:
+    """Pretty-format JSON responses while preserving plain-text responses."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.dumps(json.loads(value), indent=2)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return value
+
+
+def parse_json_object_string(value: str, context: str) -> dict[str, object]:
+    """Parse and validate a stringified JSON object."""
+    parsed = parse_json_value(value, context)
+    if not isinstance(parsed, dict):
+        raise GhidraValidationError(f"{context} must be a JSON object")
+    return parsed
+
+
 def parse_address_list(addresses: str, param_name: str = "addresses") -> list[str]:
     """
     Parse comma-separated or JSON array of hex addresses with validation.
@@ -590,15 +619,16 @@ def parse_address_list(addresses: str, param_name: str = "addresses") -> list[st
     Raises:
         GhidraValidationError: If addresses format is invalid or contains invalid hex addresses
     """
-    import json
+    if not isinstance(addresses, str) or not addresses.strip():
+        raise GhidraValidationError(f"{param_name} must be a non-empty string")
 
+    addresses = addresses.strip()
     addr_list = []
     if addresses.startswith("["):
-        try:
-            addr_list = json.loads(addresses)
-        except json.JSONDecodeError as e:
+        addr_list = parse_json_value(addresses, param_name)
+        if not isinstance(addr_list, list):
             raise GhidraValidationError(
-                f"Invalid JSON array format for {param_name}: {e}"
+                f"{param_name} must be a JSON array when using JSON input"
             )
     else:
         addr_list = [addr.strip() for addr in addresses.split(",") if addr.strip()]
@@ -3252,19 +3282,19 @@ def create_struct(name: str, fields: list) -> str:
         - Structure names must be unique (not previously defined)
         - Use apply_data_type tool to apply the struct to memory locations
     """
-    import json
-
     normalized_fields = []
     for field in fields or []:
         if isinstance(field, str):
             stripped = field.strip()
             if stripped.startswith("{") and stripped.endswith("}"):
                 try:
-                    parsed = json.loads(stripped)
-                    if isinstance(parsed, dict):
-                        normalized_fields.append(parsed)
-                        continue
-                except Exception:
+                    parsed = parse_json_object_string(
+                        stripped, "create_struct.fields[] entry"
+                    )
+                    normalized_fields.append(parsed)
+                    continue
+                except GhidraValidationError:
+                    # Keep original entry for backwards compatibility with legacy callers.
                     pass
         normalized_fields.append(field)
 
@@ -3834,8 +3864,6 @@ def analyze_data_region(
           "current_type": "undefined"
         }
     """
-    import json
-
     if not validate_hex_address(address):
         raise GhidraValidationError(f"Invalid hex address format: {address}")
 
@@ -3851,13 +3879,7 @@ def analyze_data_region(
     }
 
     result = safe_post_json("analyze_data_region", data)
-
-    # Format the JSON response for readability
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 @mcp.tool()
@@ -3896,8 +3918,6 @@ def inspect_memory_content(
           "string_length": 5
         }
     """
-    import json
-
     if not validate_hex_address(address):
         raise GhidraValidationError(f"Invalid hex address format: {address}")
 
@@ -3913,13 +3933,7 @@ def inspect_memory_content(
         params["program"] = program
 
     result = "\n".join(safe_get("inspect_memory_content", params))
-
-    # Try to format as JSON for readability
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 @mcp.tool()
@@ -3943,32 +3957,11 @@ def get_bulk_xrefs(addresses: str) -> str:
           "0x6fb835bc": [{"from": "0x6fb6c9fe", "type": "READ"}]
         }
     """
-    import json
-
-    # Parse input - support both comma-separated and JSON array
-    addr_list = []
-    if addresses.startswith("["):
-        try:
-            addr_list = json.loads(addresses)
-        except:
-            raise GhidraValidationError("Invalid JSON array format for addresses")
-    else:
-        addr_list = [addr.strip() for addr in addresses.split(",")]
-
-    # Validate all addresses
-    for addr in addr_list:
-        if not validate_hex_address(addr):
-            raise GhidraValidationError(f"Invalid hex address format: {addr}")
+    addr_list = parse_address_list(addresses, "addresses")
 
     data = {"addresses": addr_list}
     result = safe_post_json("get_bulk_xrefs", data)
-
-    # Format the JSON response for readability
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 @mcp.tool()
@@ -4006,8 +3999,6 @@ def detect_array_bounds(
           "indexing_patterns": ["[base + index*12]", "LEA EDX, [EAX*3 + base]"]
         }
     """
-    import json
-
     if not validate_hex_address(address):
         raise GhidraValidationError(f"Invalid hex address format: {address}")
 
@@ -4022,13 +4013,7 @@ def detect_array_bounds(
     }
 
     result = safe_post_json("detect_array_bounds", data)
-
-    # Format the JSON response for readability
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 @mcp.tool()
@@ -4063,22 +4048,7 @@ def get_assembly_context(
           }
         ]
     """
-    import json
-
-    # Parse input
-    addr_list = []
-    if xref_sources.startswith("["):
-        try:
-            addr_list = json.loads(xref_sources)
-        except:
-            raise GhidraValidationError("Invalid JSON array format for xref_sources")
-    else:
-        addr_list = [addr.strip() for addr in xref_sources.split(",")]
-
-    # Validate all addresses
-    for addr in addr_list:
-        if not validate_hex_address(addr):
-            raise GhidraValidationError(f"Invalid hex address format: {addr}")
+    addr_list = parse_address_list(xref_sources, "xref_sources")
 
     if not isinstance(context_instructions, int) or context_instructions < 0:
         raise GhidraValidationError(
@@ -4094,13 +4064,7 @@ def get_assembly_context(
     }
 
     result = safe_post_json("get_assembly_context", data)
-
-    # Format the JSON response for readability
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 # ============================================================================
@@ -4145,8 +4109,6 @@ def analyze_struct_field_usage(
           }
         }
     """
-    import json
-
     if not validate_hex_address(address):
         raise GhidraValidationError(f"Invalid hex address format: {address}")
 
@@ -4159,13 +4121,7 @@ def analyze_struct_field_usage(
         data["struct_name"] = struct_name
 
     result = safe_post_json("analyze_struct_field_usage", data)
-
-    # Format the JSON response for readability
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 @mcp.tool()
@@ -4202,8 +4158,6 @@ def get_field_access_context(
           ]
         }
     """
-    import json
-
     if not validate_hex_address(struct_address):
         raise GhidraValidationError(f"Invalid hex address format: {struct_address}")
 
@@ -4221,13 +4175,7 @@ def get_field_access_context(
     }
 
     result = safe_post_json("get_field_access_context", data)
-
-    # Format the JSON response for readability
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 @mcp.tool()
@@ -5196,8 +5144,6 @@ def run_ghidra_script(
         # Run with multiple arguments
         run_ghidra_script("RebaseScript", args="0x08000000 0x20000000")
     """
-    import json
-
     if not script_name or not isinstance(script_name, str):
         raise GhidraValidationError("script_name is required")
 
@@ -5210,12 +5156,7 @@ def run_ghidra_script(
         payload["args"] = args
 
     result = safe_post_json("run_ghidra_script", payload)
-
-    try:
-        parsed = json.loads(result)
-        return json.dumps(parsed, indent=2)
-    except:
-        return result
+    return pretty_json_or_raw(result)
 
 
 @mcp.tool()
@@ -6685,7 +6626,7 @@ def build_function_hash_index(
             make_request(f"{ghidra_server_url}/get_current_program_info")
         )
         current_program = current_info.get("name", "Unknown")
-    except:
+    except (json.JSONDecodeError, TypeError, ValueError):
         current_program = "Unknown"
 
     # If no programs specified, just scan current program
@@ -6754,8 +6695,8 @@ def build_function_hash_index(
                                 )
                             )
                             completeness = comp_result.get("completeness_score", 0)
-                        except:
-                            pass
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            completeness = 0
 
                     instance = {
                         "program": program_name,

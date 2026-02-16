@@ -162,6 +162,40 @@ class TestAddressListParsing:
             parse_address_list("0x401000, invalid_address")
 
 
+class TestJsonHelpers:
+    """Tests for shared JSON parsing and formatting helpers."""
+
+    def test_parse_json_value_valid(self):
+        """Valid JSON should parse correctly."""
+        from bridge_mcp_ghidra import parse_json_value
+
+        parsed = parse_json_value('{"a": 1, "b": true}', "payload")
+        assert parsed["a"] == 1
+        assert parsed["b"] is True
+
+    def test_parse_json_value_invalid_raises(self):
+        """Invalid JSON should raise validation error."""
+        from bridge_mcp_ghidra import parse_json_value, GhidraValidationError
+
+        with pytest.raises(GhidraValidationError):
+            parse_json_value("{not-json}", "payload")
+
+    def test_pretty_json_or_raw_json_input(self):
+        """JSON strings should be pretty-formatted."""
+        from bridge_mcp_ghidra import pretty_json_or_raw
+
+        value = pretty_json_or_raw('{"x":1}')
+        assert "\n" in value
+        assert '"x": 1' in value
+
+    def test_pretty_json_or_raw_plain_text(self):
+        """Non-JSON strings should be returned unchanged."""
+        from bridge_mcp_ghidra import pretty_json_or_raw
+
+        text = "plain text response"
+        assert pretty_json_or_raw(text) == text
+
+
 class TestCacheKeyGeneration:
     """Tests for cache key generation."""
 
