@@ -931,7 +931,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         });
 
         server.createContext("/analyze_data_region", exchange -> {
-            Map<String, String> params = parseQueryParams(exchange);
+            Map<String, String> params = parseRequestParams(exchange);
             String address = params.get("address");
             int maxScanBytes = parseIntOrDefault(params.get("max_scan_bytes"), 1024);
             boolean includeXrefMap = parseBooleanOrDefault(params.get("include_xref_map"), true);
@@ -957,7 +957,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         });
 
         server.createContext("/detect_array_bounds", exchange -> {
-            Map<String, String> params = parseQueryParams(exchange);
+            Map<String, String> params = parseRequestParams(exchange);
             String address = params.get("address");
             boolean analyzeLoopBounds = parseBooleanOrDefault(params.get("analyze_loop_bounds"), true);
             boolean analyzeIndexing = parseBooleanOrDefault(params.get("analyze_indexing"), true);
@@ -966,7 +966,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         });
 
         server.createContext("/get_assembly_context", exchange -> {
-            Map<String, String> params = parseQueryParams(exchange);
+            Map<String, String> params = parseRequestParams(exchange);
             String xrefSources = params.get("xref_sources");
             int contextInstructions = parseIntOrDefault(params.get("context_instructions"), 5);
             String includePatterns = params.get("include_patterns");
@@ -975,7 +975,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         });
 
         server.createContext("/analyze_struct_field_usage", exchange -> {
-            Map<String, String> params = parseQueryParams(exchange);
+            Map<String, String> params = parseRequestParams(exchange);
             String address = params.get("address");
             String structName = params.get("struct_name");
             int maxFunctions = parseIntOrDefault(params.get("max_functions"), 10);
@@ -983,7 +983,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         });
 
         server.createContext("/get_field_access_context", exchange -> {
-            Map<String, String> params = parseQueryParams(exchange);
+            Map<String, String> params = parseRequestParams(exchange);
             String structAddress = params.get("struct_address");
             int fieldOffset = parseIntOrDefault(params.get("field_offset"), 0);
             int numExamples = parseIntOrDefault(params.get("num_examples"), 5);
@@ -1141,6 +1141,21 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         }
 
         return parseUrlEncodedBody(body);
+    }
+
+    private Map<String, String> parseRequestParams(HttpExchange exchange) {
+        Map<String, String> params = new HashMap<>(parseQueryParams(exchange));
+        String method = exchange.getRequestMethod();
+        if (method != null && ("POST".equalsIgnoreCase(method)
+            || "PUT".equalsIgnoreCase(method)
+            || "PATCH".equalsIgnoreCase(method))) {
+            try {
+                params.putAll(parsePostParams(exchange));
+            } catch (IOException e) {
+                Msg.warn(this, "Failed to parse request body, using query params only: " + e.getMessage());
+            }
+        }
+        return params;
     }
 
     private Map<String, String> parseUrlEncodedBody(String body) {

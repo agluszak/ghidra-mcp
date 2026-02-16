@@ -1136,9 +1136,7 @@ public class GhidraMCPPlugin extends Plugin {
             String name = (String) params.get("name");
             String returnType = (String) params.get("return_type");
             Object parametersObj = params.get("parameters");
-            String parametersJson = (parametersObj instanceof String) ? (String) parametersObj : 
-                                   (parametersObj != null ? parametersObj.toString() : null);
-            sendResponse(exchange, createFunctionSignature(name, returnType, parametersJson));
+            sendResponse(exchange, createFunctionSignature(name, returnType, parametersObj));
         }));
 
         // Memory reading endpoint
@@ -9936,7 +9934,7 @@ public class GhidraMCPPlugin extends Plugin {
     /**
      * Create a function signature data type
      */
-    private String createFunctionSignature(String name, String returnType, String parametersJson) {
+    private String createFunctionSignature(String name, String returnType, Object parametersObj) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (name == null || name.isEmpty()) return "Function name is required";
@@ -9963,30 +9961,11 @@ public class GhidraMCPPlugin extends Plugin {
                     funcDef.setReturnType(returnDataType);
 
                     // Parse parameters if provided
-                    if (parametersJson != null && !parametersJson.isEmpty()) {
-                        try {
-                            // Simple JSON parsing for parameters
-                            String[] paramPairs = parametersJson.replace("[", "").replace("]", "")
-                                                               .replace("{", "").replace("}", "")
-                                                               .split(",");
-                            
-                            for (String paramPair : paramPairs) {
-                                if (paramPair.trim().isEmpty()) continue;
-                                
-                                String[] parts = paramPair.split(":");
-                                if (parts.length >= 2) {
-                                    String paramType = parts[1].replace("\"", "").trim();
-                                    DataType paramDataType = resolveDataType(dtm, paramType);
-                                    if (paramDataType != null) {
-                                        funcDef.setArguments(new ParameterDefinition[] {
-                                            new ParameterDefinitionImpl(null, paramDataType, null)
-                                        });
-                                    }
-                                }
-                            }
-                        } catch (Exception e) {
-                            // If JSON parsing fails, continue without parameters
-                            result.append("Warning: Could not parse parameters, continuing without them. ");
+                    if (parametersObj != null) {
+                        List<ParameterDefinition> parameterDefinitions =
+                            parseFunctionSignatureParameters(parametersObj, dtm, result);
+                        if (!parameterDefinitions.isEmpty()) {
+                            funcDef.setArguments(parameterDefinitions.toArray(new ParameterDefinition[0]));
                         }
                     }
 
@@ -10006,6 +9985,71 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         return result.toString();
+    }
+
+    private List<ParameterDefinition> parseFunctionSignatureParameters(Object parametersObj,
+                                                                       DataTypeManager dtm,
+                                                                       StringBuilder result) {
+        List<Object> rawParameters = new ArrayList<>();
+        List<ParameterDefinition> parameterDefinitions = new ArrayList<>();
+
+        if (parametersObj instanceof List<?>) {
+            rawParameters.addAll((List<?>) parametersObj);
+        } else if (parametersObj instanceof String) {
+            String text = ((String) parametersObj).trim();
+            if (text.isEmpty()) {
+                return parameterDefinitions;
+            }
+            try {
+                if (!text.startsWith("[")) {
+                    result.append(" Warning: parameters must be a JSON array.");
+                    return parameterDefinitions;
+                }
+                rawParameters = JSON_MAPPER.readValue(text, new TypeReference<List<Object>>() {});
+            } catch (Exception e) {
+                result.append(" Warning: Could not parse parameters JSON, continuing without parameters.");
+                return parameterDefinitions;
+            }
+        } else {
+            result.append(" Warning: Unsupported parameters payload type, continuing without parameters.");
+            return parameterDefinitions;
+        }
+
+        int parameterIndex = 0;
+        for (Object rawParameter : rawParameters) {
+            parameterIndex++;
+            String parameterName = null;
+            String parameterTypeName = null;
+
+            if (rawParameter instanceof Map<?, ?>) {
+                Map<?, ?> map = (Map<?, ?>) rawParameter;
+                Object typeObj = map.get("type");
+                if (typeObj != null) {
+                    parameterTypeName = typeObj.toString().trim();
+                }
+
+                Object nameObj = map.get("name");
+                if (nameObj != null) {
+                    parameterName = nameObj.toString().trim();
+                }
+            }
+
+            if (parameterTypeName == null || parameterTypeName.isEmpty()) {
+                result.append(" Warning: Parameter ").append(parameterIndex).append(" has no type and was skipped.");
+                continue;
+            }
+
+            DataType parameterDataType = resolveDataType(dtm, parameterTypeName);
+            if (parameterDataType == null) {
+                result.append(" Warning: Parameter ").append(parameterIndex)
+                    .append(" type not found: ").append(parameterTypeName).append(".");
+                continue;
+            }
+
+            parameterDefinitions.add(new ParameterDefinitionImpl(parameterName, parameterDataType, null));
+        }
+
+        return parameterDefinitions;
     }
 
     // ==========================================================================

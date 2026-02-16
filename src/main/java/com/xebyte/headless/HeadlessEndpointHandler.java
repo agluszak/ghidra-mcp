@@ -4576,18 +4576,22 @@ public class HeadlessEndpointHandler {
             return "{\"error\": \"No program loaded\"}";
         }
 
+        if (xrefSourcesStr == null || xrefSourcesStr.trim().isEmpty()) {
+            return "{\"error\": \"xref_sources is required\"}";
+        }
+
         StringBuilder json = new StringBuilder();
         json.append("{");
 
         try {
-            // Parse comma-separated addresses
-            String[] addresses = xrefSourcesStr.split(",");
+            List<String> addresses = parseStringArrayPayload(xrefSourcesStr);
+            if (addresses.isEmpty()) {
+                return "{\"error\": \"No valid xref source addresses provided\"}";
+            }
             Listing listing = program.getListing();
             boolean first = true;
 
             for (String addrStr : addresses) {
-                addrStr = addrStr.trim();
-                if (addrStr.isEmpty()) continue;
 
                 if (!first) json.append(",");
                 first = false;
@@ -4646,6 +4650,23 @@ public class HeadlessEndpointHandler {
 
         json.append("}");
         return json.toString();
+    }
+
+    private List<String> parseStringArrayPayload(String value) {
+        if (value == null) {
+            return Collections.emptyList();
+        }
+
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        if (!trimmed.startsWith("[")) {
+            return Collections.emptyList();
+        }
+
+        return parseStringArray(trimmed);
     }
 
     /**
