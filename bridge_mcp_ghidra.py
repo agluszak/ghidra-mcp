@@ -605,7 +605,40 @@ def parse_json_object_string(value: str, context: str) -> dict[str, object]:
     return parsed
 
 
-def parse_address_list(addresses: str, param_name: str = "addresses") -> list[str]:
+def parse_string_list(value: str | list[str], param_name: str) -> list[str]:
+    """Parse a non-empty string list from JSON array, CSV string, or list input."""
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise GhidraValidationError(f"{param_name} must be a non-empty string or list")
+        if stripped.startswith("["):
+            parsed = parse_json_value(stripped, param_name)
+            if not isinstance(parsed, list):
+                raise GhidraValidationError(
+                    f"{param_name} must be a JSON array when using JSON input"
+                )
+            items = parsed
+        else:
+            items = [item.strip() for item in stripped.split(",") if item.strip()]
+    else:
+        raise GhidraValidationError(f"{param_name} must be a string or list")
+
+    normalized = []
+    for item in items:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            normalized.append(text)
+
+    if not normalized:
+        raise GhidraValidationError(f"{param_name} must contain at least one value")
+    return normalized
+
+
+def parse_address_list(addresses: str | list[str], param_name: str = "addresses") -> list[str]:
     """
     Parse comma-separated or JSON array of hex addresses with validation.
 
@@ -619,19 +652,7 @@ def parse_address_list(addresses: str, param_name: str = "addresses") -> list[st
     Raises:
         GhidraValidationError: If addresses format is invalid or contains invalid hex addresses
     """
-    if not isinstance(addresses, str) or not addresses.strip():
-        raise GhidraValidationError(f"{param_name} must be a non-empty string")
-
-    addresses = addresses.strip()
-    addr_list = []
-    if addresses.startswith("["):
-        addr_list = parse_json_value(addresses, param_name)
-        if not isinstance(addr_list, list):
-            raise GhidraValidationError(
-                f"{param_name} must be a JSON array when using JSON input"
-            )
-    else:
-        addr_list = [addr.strip() for addr in addresses.split(",") if addr.strip()]
+    addr_list = parse_string_list(addresses, param_name)
 
     # Validate all addresses
     for addr in addr_list:
@@ -4055,7 +4076,12 @@ def get_assembly_context(
             "context_instructions must be a non-negative integer"
         )
 
-    pattern_list = [p.strip() for p in include_patterns.split(",")]
+    raw_patterns = parse_string_list(include_patterns, "include_patterns")
+    pattern_list = []
+    for pattern in raw_patterns:
+        normalized = pattern.upper()
+        if normalized not in pattern_list:
+            pattern_list.append(normalized)
 
     data = {
         "xref_sources": addr_list,

@@ -154,12 +154,41 @@ class TestAddressListParsing:
         result = parse_address_list('["0x401000", "0x402000"]')
         assert result == ["0x401000", "0x402000"]
 
+    def test_parse_python_list(self):
+        """Should accept already-parsed Python list inputs."""
+        from bridge_mcp_ghidra import parse_address_list
+
+        result = parse_address_list(["0x401000", "0x402000"])
+        assert result == ["0x401000", "0x402000"]
+
     def test_parse_invalid_address_raises(self):
         """Should raise on invalid addresses."""
         from bridge_mcp_ghidra import parse_address_list, GhidraValidationError
 
         with pytest.raises(GhidraValidationError):
             parse_address_list("0x401000, invalid_address")
+
+
+class TestStringListParsing:
+    """Tests for generic string-list parsing helper."""
+
+    def test_parse_string_list_csv(self):
+        from bridge_mcp_ghidra import parse_string_list
+
+        result = parse_string_list("MOV,CALL,JMP", "include_patterns")
+        assert result == ["MOV", "CALL", "JMP"]
+
+    def test_parse_string_list_json_array(self):
+        from bridge_mcp_ghidra import parse_string_list
+
+        result = parse_string_list('["MOV","CALL"]', "include_patterns")
+        assert result == ["MOV", "CALL"]
+
+    def test_parse_string_list_python_list(self):
+        from bridge_mcp_ghidra import parse_string_list
+
+        result = parse_string_list(["MOV", "CALL"], "include_patterns")
+        assert result == ["MOV", "CALL"]
 
 
 class TestJsonHelpers:
