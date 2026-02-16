@@ -57,6 +57,9 @@ public class HeadlessEndpointHandler {
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final long SCRIPT_JOB_RETENTION_MS = 60L * 60L * 1000L;
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+    private static final Set<String> DEFAULT_ASSEMBLY_INCLUDE_PATTERNS = Set.of(
+        "LEA", "MOV", "CMP", "IMUL", "ADD", "SUB"
+    );
 
     private final ProgramProvider programProvider;
     private final ThreadingStrategy threadingStrategy;
@@ -4585,6 +4588,7 @@ public class HeadlessEndpointHandler {
 
         try {
             List<String> addresses = parseStringArrayPayload(xrefSourcesStr);
+            Set<String> includeFilters = parseIncludePatternPayload(includePatterns);
             if (addresses.isEmpty()) {
                 return "{\"error\": \"No valid xref source addresses provided\"}";
             }
@@ -4631,7 +4635,21 @@ public class HeadlessEndpointHandler {
                             }
                             json.append("],");
 
-                            json.append("\"mnemonic\": \"").append(instr.getMnemonicString()).append("\"");
+                            String mnemonic = instr.getMnemonicString().toUpperCase(Locale.ROOT);
+                            List<String> detectedPatterns = detectAssemblyPatterns(mnemonic);
+                            List<String> filteredPatterns =
+                                filterAssemblyPatterns(mnemonic, detectedPatterns, includeFilters);
+                            boolean patternFilterMatch =
+                                includeFilters.contains(mnemonic) || !filteredPatterns.isEmpty();
+
+                            json.append("\"mnemonic\": \"").append(mnemonic).append("\",");
+                            json.append("\"pattern_filter_match\": ").append(patternFilterMatch).append(",");
+                            json.append("\"patterns_detected\": [");
+                            for (int i = 0; i < filteredPatterns.size(); i++) {
+                                if (i > 0) json.append(",");
+                                json.append("\"").append(filteredPatterns.get(i)).append("\"");
+                            }
+                            json.append("]");
                         } else {
                             json.append("\"error\": \"No instruction at address\"");
                         }
@@ -4650,6 +4668,79 @@ public class HeadlessEndpointHandler {
 
         json.append("}");
         return json.toString();
+    }
+
+    private Set<String> parseIncludePatternPayload(String includePatterns) {
+        LinkedHashSet<String> includeFilters = new LinkedHashSet<>();
+        if (includePatterns != null && !includePatterns.trim().isEmpty()) {
+            String trimmed = includePatterns.trim();
+            if (trimmed.startsWith("[")) {
+                for (String pattern : parseStringArray(trimmed)) {
+                    String normalized = normalizeAssemblyPatternToken(pattern);
+                    if (normalized != null) {
+                        includeFilters.add(normalized);
+                    }
+                }
+            }
+            if (includeFilters.isEmpty()) {
+                for (String part : trimmed.split(",")) {
+                    String normalized = normalizeAssemblyPatternToken(part);
+                    if (normalized != null) {
+                        includeFilters.add(normalized);
+                    }
+                }
+            }
+        }
+        if (includeFilters.isEmpty()) {
+            includeFilters.addAll(DEFAULT_ASSEMBLY_INCLUDE_PATTERNS);
+        }
+        return includeFilters;
+    }
+
+    private String normalizeAssemblyPatternToken(String rawToken) {
+        if (rawToken == null) {
+            return null;
+        }
+        String normalized = rawToken.trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        return normalized.toUpperCase(Locale.ROOT).replace('-', '_');
+    }
+
+    private List<String> detectAssemblyPatterns(String mnemonic) {
+        List<String> patterns = new ArrayList<>();
+        if ("MOV".equals(mnemonic) || "LEA".equals(mnemonic)) {
+            patterns.add("data_access");
+        }
+        if ("CMP".equals(mnemonic) || "TEST".equals(mnemonic)) {
+            patterns.add("comparison");
+        }
+        if ("IMUL".equals(mnemonic) || "SHL".equals(mnemonic) || "SHR".equals(mnemonic)) {
+            patterns.add("arithmetic");
+        }
+        if ("PUSH".equals(mnemonic) || "POP".equals(mnemonic)) {
+            patterns.add("stack_operation");
+        }
+        if (mnemonic.startsWith("J") || "CALL".equals(mnemonic)) {
+            patterns.add("control_flow");
+        }
+        return patterns;
+    }
+
+    private List<String> filterAssemblyPatterns(String mnemonic,
+                                                List<String> detectedPatterns,
+                                                Set<String> includeFilters) {
+        if (includeFilters.contains(mnemonic)) {
+            return detectedPatterns;
+        }
+        List<String> filtered = new ArrayList<>();
+        for (String pattern : detectedPatterns) {
+            if (includeFilters.contains(pattern.toUpperCase(Locale.ROOT))) {
+                filtered.add(pattern);
+            }
+        }
+        return filtered;
     }
 
     private List<String> parseStringArrayPayload(String value) {

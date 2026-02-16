@@ -170,6 +170,9 @@ public class GhidraMCPPlugin extends Plugin {
         "typedef", "sizeof", "const", "static", "extern", "auto", "register",
         "signed", "unsigned", "volatile", "inline", "restrict"
     );
+    private static final Set<String> DEFAULT_ASSEMBLY_INCLUDE_PATTERNS = Set.of(
+        "LEA", "MOV", "CMP", "IMUL", "ADD", "SUB"
+    );
 
     private static final AtomicInteger SCRIPT_THREAD_COUNTER = new AtomicInteger(0);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
@@ -1135,8 +1138,9 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, Object> params = parseJsonParams(exchange);
             String name = (String) params.get("name");
             String returnType = (String) params.get("return_type");
+            String callingConvention = (String) params.get("calling_convention");
             Object parametersObj = params.get("parameters");
-            sendResponse(exchange, createFunctionSignature(name, returnType, parametersObj));
+            sendResponse(exchange, createFunctionSignature(name, returnType, parametersObj, callingConvention));
         }));
 
         // Memory reading endpoint
@@ -6192,25 +6196,21 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         try {
-            // Parse JSON manually (simple parsing for this format)
-            String targetAddress = extractJsonString(jsonBody, "target_address");
-            String functionName = extractJsonString(jsonBody, "function_name");
-            String returnType = extractJsonString(jsonBody, "return_type");
-            String callingConvention = extractJsonString(jsonBody, "calling_convention");
-            String plateComment = extractJsonString(jsonBody, "plate_comment");
-            
-            if (targetAddress == null) {
+            FunctionDocumentationPayload payload =
+                JSON_MAPPER.readValue(jsonBody, FunctionDocumentationPayload.class);
+
+            if (payload.target_address == null || payload.target_address.trim().isEmpty()) {
                 return "{\"error\": \"target_address is required\"}";
             }
 
-            Address addr = program.getAddressFactory().getAddress(targetAddress);
+            Address addr = program.getAddressFactory().getAddress(payload.target_address.trim());
             if (addr == null) {
-                return "{\"error\": \"Invalid target address: " + targetAddress + "\"}";
+                return "{\"error\": \"Invalid target address: " + escapeJson(payload.target_address) + "\"}";
             }
 
             Function func = program.getFunctionManager().getFunctionAt(addr);
             if (func == null) {
-                return "{\"error\": \"No function at target address: " + targetAddress + "\"}";
+                return "{\"error\": \"No function at target address: " + escapeJson(payload.target_address) + "\"}";
             }
 
             final AtomicBoolean success = new AtomicBoolean(false);
@@ -6222,9 +6222,11 @@ public class GhidraMCPPlugin extends Plugin {
                     int tx = program.startTransaction("Apply Function Documentation");
                     try {
                         // Apply function name
-                        if (functionName != null && !functionName.isEmpty() && !functionName.equals(func.getName())) {
+                        if (payload.function_name != null
+                            && !payload.function_name.isEmpty()
+                            && !payload.function_name.equals(func.getName())) {
                             try {
-                                func.setName(functionName, SourceType.USER_DEFINED);
+                                func.setName(payload.function_name, SourceType.USER_DEFINED);
                                 changesApplied.incrementAndGet();
                             } catch (Exception e) {
                                 Msg.warn(this, "Could not set function name: " + e.getMessage());
@@ -6232,15 +6234,15 @@ public class GhidraMCPPlugin extends Plugin {
                         }
                         
                         // Apply plate comment
-                        if (plateComment != null && !plateComment.isEmpty()) {
-                            func.setComment(plateComment);
+                        if (payload.plate_comment != null && !payload.plate_comment.isEmpty()) {
+                            func.setComment(payload.plate_comment);
                             changesApplied.incrementAndGet();
                         }
                         
                         // Apply calling convention
-                        if (callingConvention != null && !callingConvention.isEmpty()) {
+                        if (payload.calling_convention != null && !payload.calling_convention.isEmpty()) {
                             try {
-                                func.setCallingConvention(callingConvention);
+                                func.setCallingConvention(payload.calling_convention);
                                 changesApplied.incrementAndGet();
                             } catch (Exception e) {
                                 Msg.warn(this, "Could not set calling convention: " + e.getMessage());
@@ -6248,8 +6250,8 @@ public class GhidraMCPPlugin extends Plugin {
                         }
                         
                         // Apply return type
-                        if (returnType != null && !returnType.isEmpty()) {
-                            DataType dt = findDataTypeByNameInAllCategories(program.getDataTypeManager(), returnType);
+                        if (payload.return_type != null && !payload.return_type.isEmpty()) {
+                            DataType dt = findDataTypeByNameInAllCategories(program.getDataTypeManager(), payload.return_type);
                             if (dt != null) {
                                 try {
                                     func.setReturnType(dt, SourceType.USER_DEFINED);
@@ -6260,23 +6262,9 @@ public class GhidraMCPPlugin extends Plugin {
                             }
                         }
                         
-                        // Apply parameter names and types from JSON array
-                        String paramsJson = extractJsonArray(jsonBody, "parameters");
-                        if (paramsJson != null) {
-                            applyParameterDocumentation(func, program, paramsJson, changesApplied);
-                        }
-                        
-                        // Apply comments from JSON array
-                        String commentsJson = extractJsonArray(jsonBody, "comments");
-                        if (commentsJson != null) {
-                            applyCommentsDocumentation(func, program, commentsJson, changesApplied);
-                        }
-                        
-                        // Apply labels from JSON array
-                        String labelsJson = extractJsonArray(jsonBody, "labels");
-                        if (labelsJson != null) {
-                            applyLabelsDocumentation(func, program, labelsJson, changesApplied);
-                        }
+                        applyDocumentationParameters(func, program, payload.parameters, changesApplied);
+                        applyDocumentationComments(func, program, payload.comments, changesApplied);
+                        applyDocumentationLabels(func, program, payload.labels, changesApplied);
                         
                         success.set(true);
                     } catch (Exception e) {
@@ -6302,172 +6290,150 @@ public class GhidraMCPPlugin extends Plugin {
         }
     }
 
-    /**
-     * Helper to extract a string value from simple JSON
-     */
-    private String extractJsonString(String json, String key) {
-        String pattern = "\"" + key + "\"\\s*:\\s*\"([^\"]*)\"";
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile(pattern);
-        java.util.regex.Matcher m = p.matcher(json);
-        if (m.find()) {
-            return m.group(1).replace("\\\"", "\"").replace("\\n", "\n");
+    private void applyDocumentationParameters(Function func,
+                                              Program program,
+                                              List<DocumentationParameterInput> parameters,
+                                              AtomicInteger changesApplied) {
+        if (parameters == null || parameters.isEmpty()) {
+            return;
         }
-        // Also check for null value
-        pattern = "\"" + key + "\"\\s*:\\s*null";
-        if (json.matches(".*" + pattern + ".*")) {
-            return null;
-        }
-        return null;
-    }
 
-    /**
-     * Helper to extract a JSON array as string
-     */
-    private String extractJsonArray(String json, String key) {
-        String pattern = "\"" + key + "\"\\s*:\\s*\\[";
-        int startIdx = json.indexOf("\"" + key + "\"");
-        if (startIdx < 0) return null;
-        
-        int arrayStart = json.indexOf('[', startIdx);
-        if (arrayStart < 0) return null;
-        
-        int depth = 1;
-        int arrayEnd = arrayStart + 1;
-        while (arrayEnd < json.length() && depth > 0) {
-            char c = json.charAt(arrayEnd);
-            if (c == '[') depth++;
-            else if (c == ']') depth--;
-            arrayEnd++;
-        }
-        
-        return json.substring(arrayStart, arrayEnd);
-    }
-
-    /**
-     * Apply parameter documentation from JSON
-     */
-    private void applyParameterDocumentation(Function func, Program program, String paramsJson, AtomicInteger changesApplied) {
-        // Parse simple array format: [{"ordinal": 0, "name": "...", "type": "..."}, ...]
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
-            "\\{\\s*\"ordinal\"\\s*:\\s*(\\d+).*?\"name\"\\s*:\\s*\"([^\"]*)\".*?\"type\"\\s*:\\s*\"([^\"]*)\"");
-        java.util.regex.Matcher m = p.matcher(paramsJson);
-        
         Parameter[] params = func.getParameters();
-        while (m.find()) {
-            try {
-                int ordinal = Integer.parseInt(m.group(1));
-                String name = m.group(2);
-                String typeName = m.group(3);
-                
-                if (ordinal < params.length) {
-                    Parameter param = params[ordinal];
-                    
-                    // Set name if different and not generic
-                    if (!name.startsWith("param_") && !name.equals(param.getName())) {
-                        try {
-                            param.setName(name, SourceType.USER_DEFINED);
-                            changesApplied.incrementAndGet();
-                        } catch (Exception e) {
-                            Msg.warn(this, "Could not set parameter name: " + e.getMessage());
-                        }
-                    }
-                    
-                    // Set type if different
-                    if (!typeName.startsWith("undefined") && !typeName.equals(param.getDataType().getName())) {
-                        DataType dt = findDataTypeByNameInAllCategories(program.getDataTypeManager(), typeName);
-                        if (dt != null) {
-                            try {
-                                param.setDataType(dt, SourceType.USER_DEFINED);
-                                changesApplied.incrementAndGet();
-                            } catch (Exception e) {
-                                Msg.warn(this, "Could not set parameter type: " + e.getMessage());
-                            }
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                // Skip this parameter
+        for (DocumentationParameterInput parameterInput : parameters) {
+            if (parameterInput == null || parameterInput.ordinal == null) {
+                continue;
             }
-        }
-    }
 
-    /**
-     * Apply inline comments from JSON
-     */
-    private void applyCommentsDocumentation(Function func, Program program, String commentsJson, AtomicInteger changesApplied) {
-        // Parse: [{"relative_offset": 0, "eol_comment": "...", "pre_comment": "..."}, ...]
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
-            "\\{\\s*\"relative_offset\"\\s*:\\s*(\\d+)");
-        java.util.regex.Matcher m = p.matcher(commentsJson);
-        
-        Address funcStart = func.getEntryPoint();
-        Listing listing = program.getListing();
-        
-        while (m.find()) {
-            try {
-                long relOffset = Long.parseLong(m.group(1));
-                Address commentAddr = funcStart.add(relOffset);
-                
-                // Extract comments for this entry
-                int entryStart = m.start();
-                int entryEnd = commentsJson.indexOf('}', entryStart);
-                if (entryEnd < 0) continue;
-                String entry = commentsJson.substring(entryStart, entryEnd + 1);
-                
-                String eolComment = extractJsonString(entry, "eol_comment");
-                String preComment = extractJsonString(entry, "pre_comment");
-                
-                CodeUnit cu = listing.getCodeUnitAt(commentAddr);
-                if (cu != null) {
-                    if (eolComment != null && !eolComment.isEmpty()) {
-                        cu.setComment(ghidra.program.model.listing.CodeUnit.EOL_COMMENT, eolComment);
-                        changesApplied.incrementAndGet();
-                    }
-                    if (preComment != null && !preComment.isEmpty()) {
-                        cu.setComment(ghidra.program.model.listing.CodeUnit.PRE_COMMENT, preComment);
-                        changesApplied.incrementAndGet();
-                    }
-                }
-            } catch (Exception e) {
-                // Skip this comment
+            int ordinal = parameterInput.ordinal;
+            if (ordinal < 0 || ordinal >= params.length) {
+                continue;
             }
-        }
-    }
 
-    /**
-     * Apply labels from JSON
-     */
-    private void applyLabelsDocumentation(Function func, Program program, String labelsJson, AtomicInteger changesApplied) {
-        // Parse: [{"relative_offset": 0, "name": "..."}, ...]
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
-            "\\{\\s*\"relative_offset\"\\s*:\\s*(\\d+).*?\"name\"\\s*:\\s*\"([^\"]*)\"");
-        java.util.regex.Matcher m = p.matcher(labelsJson);
-        
-        Address funcStart = func.getEntryPoint();
-        SymbolTable symTable = program.getSymbolTable();
-        
-        while (m.find()) {
-            try {
-                long relOffset = Long.parseLong(m.group(1));
-                String labelName = m.group(2);
-                
-                Address labelAddr = funcStart.add(relOffset);
-                
-                // Check if label already exists
-                Symbol existing = symTable.getPrimarySymbol(labelAddr);
-                if (existing == null || existing.getSymbolType() != SymbolType.LABEL || 
-                    !existing.getName().equals(labelName)) {
+            Parameter param = params[ordinal];
+            if (parameterInput.name != null
+                && !parameterInput.name.isEmpty()
+                && !parameterInput.name.startsWith("param_")
+                && !parameterInput.name.equals(param.getName())) {
+                try {
+                    param.setName(parameterInput.name, SourceType.USER_DEFINED);
+                    changesApplied.incrementAndGet();
+                } catch (Exception e) {
+                    Msg.warn(this, "Could not set parameter name: " + e.getMessage());
+                }
+            }
+
+            if (parameterInput.type != null
+                && !parameterInput.type.isEmpty()
+                && !parameterInput.type.startsWith("undefined")
+                && !parameterInput.type.equals(param.getDataType().getName())) {
+                DataType dt = findDataTypeByNameInAllCategories(program.getDataTypeManager(), parameterInput.type);
+                if (dt != null) {
                     try {
-                        symTable.createLabel(labelAddr, labelName, SourceType.USER_DEFINED);
+                        param.setDataType(dt, SourceType.USER_DEFINED);
                         changesApplied.incrementAndGet();
                     } catch (Exception e) {
-                        Msg.warn(this, "Could not create label: " + e.getMessage());
+                        Msg.warn(this, "Could not set parameter type: " + e.getMessage());
                     }
                 }
-            } catch (Exception e) {
-                // Skip this label
             }
         }
+    }
+
+    private void applyDocumentationComments(Function func,
+                                            Program program,
+                                            List<DocumentationCommentInput> comments,
+                                            AtomicInteger changesApplied) {
+        if (comments == null || comments.isEmpty()) {
+            return;
+        }
+
+        Address funcStart = func.getEntryPoint();
+        Listing listing = program.getListing();
+        for (DocumentationCommentInput commentInput : comments) {
+            if (commentInput == null || commentInput.relative_offset == null) {
+                continue;
+            }
+
+            try {
+                Address commentAddr = funcStart.add(commentInput.relative_offset);
+                CodeUnit cu = listing.getCodeUnitAt(commentAddr);
+                if (cu == null) {
+                    continue;
+                }
+
+                if (commentInput.eol_comment != null && !commentInput.eol_comment.isEmpty()) {
+                    cu.setComment(ghidra.program.model.listing.CodeUnit.EOL_COMMENT, commentInput.eol_comment);
+                    changesApplied.incrementAndGet();
+                }
+                if (commentInput.pre_comment != null && !commentInput.pre_comment.isEmpty()) {
+                    cu.setComment(ghidra.program.model.listing.CodeUnit.PRE_COMMENT, commentInput.pre_comment);
+                    changesApplied.incrementAndGet();
+                }
+            } catch (Exception e) {
+                Msg.warn(this, "Could not apply comment entry: " + e.getMessage());
+            }
+        }
+    }
+
+    private void applyDocumentationLabels(Function func,
+                                          Program program,
+                                          List<DocumentationLabelInput> labels,
+                                          AtomicInteger changesApplied) {
+        if (labels == null || labels.isEmpty()) {
+            return;
+        }
+
+        Address funcStart = func.getEntryPoint();
+        SymbolTable symTable = program.getSymbolTable();
+        for (DocumentationLabelInput labelInput : labels) {
+            if (labelInput == null
+                || labelInput.relative_offset == null
+                || labelInput.name == null
+                || labelInput.name.isEmpty()) {
+                continue;
+            }
+
+            try {
+                Address labelAddr = funcStart.add(labelInput.relative_offset);
+                Symbol existing = symTable.getPrimarySymbol(labelAddr);
+                if (existing == null
+                    || existing.getSymbolType() != SymbolType.LABEL
+                    || !existing.getName().equals(labelInput.name)) {
+                    symTable.createLabel(labelAddr, labelInput.name, SourceType.USER_DEFINED);
+                    changesApplied.incrementAndGet();
+                }
+            } catch (Exception e) {
+                Msg.warn(this, "Could not create label: " + e.getMessage());
+            }
+        }
+    }
+
+    private static class FunctionDocumentationPayload {
+        public String target_address;
+        public String function_name;
+        public String return_type;
+        public String calling_convention;
+        public String plate_comment;
+        public List<DocumentationParameterInput> parameters = Collections.emptyList();
+        public List<DocumentationCommentInput> comments = Collections.emptyList();
+        public List<DocumentationLabelInput> labels = Collections.emptyList();
+    }
+
+    private static class DocumentationParameterInput {
+        public Integer ordinal;
+        public String name;
+        public String type;
+    }
+
+    private static class DocumentationCommentInput {
+        public Long relative_offset;
+        public String eol_comment;
+        public String pre_comment;
+    }
+
+    private static class DocumentationLabelInput {
+        public Long relative_offset;
+        public String name;
     }
 
     /**
@@ -9934,7 +9900,7 @@ public class GhidraMCPPlugin extends Plugin {
     /**
      * Create a function signature data type
      */
-    private String createFunctionSignature(String name, String returnType, Object parametersObj) {
+    private String createFunctionSignature(String name, String returnType, Object parametersObj, String callingConvention) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (name == null || name.isEmpty()) return "Function name is required";
@@ -9959,6 +9925,17 @@ public class GhidraMCPPlugin extends Plugin {
                     // Create function definition
                     FunctionDefinitionDataType funcDef = new FunctionDefinitionDataType(name);
                     funcDef.setReturnType(returnDataType);
+
+                    if (callingConvention != null && !callingConvention.trim().isEmpty()) {
+                        GenericCallingConvention genericCallingConvention =
+                            resolveGenericCallingConvention(callingConvention);
+                        if (genericCallingConvention != null) {
+                            funcDef.setGenericCallingConvention(genericCallingConvention);
+                        } else {
+                            result.append(" Warning: Unknown calling convention: ")
+                                .append(callingConvention).append(".");
+                        }
+                    }
 
                     // Parse parameters if provided
                     if (parametersObj != null) {
@@ -10050,6 +10027,30 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         return parameterDefinitions;
+    }
+
+    private GenericCallingConvention resolveGenericCallingConvention(String callingConvention) {
+        if (callingConvention == null) {
+            return null;
+        }
+
+        String normalized = callingConvention.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        if (normalized.startsWith("__")) {
+            normalized = normalized.substring(2);
+        }
+
+        return switch (normalized) {
+            case "unknown" -> GenericCallingConvention.unknown;
+            case "stdcall" -> GenericCallingConvention.stdcall;
+            case "cdecl" -> GenericCallingConvention.cdecl;
+            case "fastcall" -> GenericCallingConvention.fastcall;
+            case "thiscall" -> GenericCallingConvention.thiscall;
+            case "vectorcall" -> GenericCallingConvention.vectorcall;
+            default -> null;
+        };
     }
 
     // ==========================================================================
@@ -10404,6 +10405,7 @@ public class GhidraMCPPlugin extends Plugin {
 
         try {
             List<String> xrefSources = new ArrayList<>();
+            Set<String> includeFilters = parseAssemblyIncludePatterns(includePatternsObj);
 
             if (xrefSourcesObj instanceof List) {
                 for (Object addr : (List<?>) xrefSourcesObj) {
@@ -10461,22 +10463,11 @@ public class GhidraMCPPlugin extends Plugin {
                             String mnemonic = instr.getMnemonicString().toUpperCase();
                             json.append("\"mnemonic\": \"").append(mnemonic).append("\",");
 
-                            List<String> patterns = new ArrayList<>();
-                            if (mnemonic.equals("MOV") || mnemonic.equals("LEA")) {
-                                patterns.add("data_access");
-                            }
-                            if (mnemonic.equals("CMP") || mnemonic.equals("TEST")) {
-                                patterns.add("comparison");
-                            }
-                            if (mnemonic.equals("IMUL") || mnemonic.equals("SHL") || mnemonic.equals("SHR")) {
-                                patterns.add("arithmetic");
-                            }
-                            if (mnemonic.equals("PUSH") || mnemonic.equals("POP")) {
-                                patterns.add("stack_operation");
-                            }
-                            if (mnemonic.startsWith("J") || mnemonic.equals("CALL")) {
-                                patterns.add("control_flow");
-                            }
+                            List<String> detectedPatterns = detectAssemblyPatterns(mnemonic);
+                            List<String> patterns = filterAssemblyPatterns(mnemonic, detectedPatterns, includeFilters);
+                            boolean patternFilterMatch =
+                                includeFilters.contains(mnemonic) || !patterns.isEmpty();
+                            json.append("\"pattern_filter_match\": ").append(patternFilterMatch).append(",");
 
                             json.append("\"patterns_detected\": [");
                             for (int i = 0; i < patterns.size(); i++) {
@@ -10500,6 +10491,95 @@ public class GhidraMCPPlugin extends Plugin {
 
         json.append("}");
         return json.toString();
+    }
+
+    private Set<String> parseAssemblyIncludePatterns(Object includePatternsObj) {
+        LinkedHashSet<String> includeFilters = new LinkedHashSet<>();
+        if (includePatternsObj instanceof List<?>) {
+            for (Object pattern : (List<?>) includePatternsObj) {
+                String normalized = normalizeAssemblyPatternToken(pattern);
+                if (normalized != null) {
+                    includeFilters.add(normalized);
+                }
+            }
+        } else if (includePatternsObj instanceof String) {
+            String raw = ((String) includePatternsObj).trim();
+            if (!raw.isEmpty()) {
+                if (raw.startsWith("[")) {
+                    try {
+                        List<Object> parsed = JSON_MAPPER.readValue(raw, new TypeReference<List<Object>>() {});
+                        for (Object pattern : parsed) {
+                            String normalized = normalizeAssemblyPatternToken(pattern);
+                            if (normalized != null) {
+                                includeFilters.add(normalized);
+                            }
+                        }
+                    } catch (Exception e) {
+                        Msg.warn(this, "Failed to parse include_patterns JSON array, using comma parsing: " + e.getMessage());
+                    }
+                }
+                if (includeFilters.isEmpty()) {
+                    for (String part : raw.split(",")) {
+                        String normalized = normalizeAssemblyPatternToken(part);
+                        if (normalized != null) {
+                            includeFilters.add(normalized);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (includeFilters.isEmpty()) {
+            includeFilters.addAll(DEFAULT_ASSEMBLY_INCLUDE_PATTERNS);
+        }
+        return includeFilters;
+    }
+
+    private String normalizeAssemblyPatternToken(Object rawToken) {
+        if (rawToken == null) {
+            return null;
+        }
+        String normalized = rawToken.toString().trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        return normalized.toUpperCase(Locale.ROOT).replace('-', '_');
+    }
+
+    private List<String> detectAssemblyPatterns(String mnemonic) {
+        List<String> patterns = new ArrayList<>();
+        if ("MOV".equals(mnemonic) || "LEA".equals(mnemonic)) {
+            patterns.add("data_access");
+        }
+        if ("CMP".equals(mnemonic) || "TEST".equals(mnemonic)) {
+            patterns.add("comparison");
+        }
+        if ("IMUL".equals(mnemonic) || "SHL".equals(mnemonic) || "SHR".equals(mnemonic)) {
+            patterns.add("arithmetic");
+        }
+        if ("PUSH".equals(mnemonic) || "POP".equals(mnemonic)) {
+            patterns.add("stack_operation");
+        }
+        if (mnemonic.startsWith("J") || "CALL".equals(mnemonic)) {
+            patterns.add("control_flow");
+        }
+        return patterns;
+    }
+
+    private List<String> filterAssemblyPatterns(String mnemonic,
+                                                List<String> detectedPatterns,
+                                                Set<String> includeFilters) {
+        if (includeFilters.contains(mnemonic)) {
+            return detectedPatterns;
+        }
+
+        List<String> filtered = new ArrayList<>();
+        for (String pattern : detectedPatterns) {
+            if (includeFilters.contains(pattern.toUpperCase(Locale.ROOT))) {
+                filtered.add(pattern);
+            }
+        }
+        return filtered;
     }
 
     /**
