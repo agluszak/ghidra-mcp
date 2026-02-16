@@ -352,6 +352,20 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
             sendResponse(exchange, endpointHandler.getFunctionByAddress(address, programName));
         });
 
+        server.createContext("/get_function_by_name", exchange -> {
+            Map<String, String> params = parseQueryParams(exchange);
+            String name = params.get("name");
+            String programName = params.get("program");
+            sendResponse(exchange, endpointHandler.getFunctionByName(name, programName));
+        });
+
+        server.createContext("/get_function_address", exchange -> {
+            Map<String, String> params = parseQueryParams(exchange);
+            String name = params.get("name");
+            String programName = params.get("program");
+            sendResponse(exchange, endpointHandler.getFunctionAddress(name, programName));
+        });
+
         server.createContext("/get_current_address", exchange -> {
             // Headless mode has no cursor
             sendResponse(exchange, "{\"error\": \"Headless mode - use address parameter with specific endpoints\"}");
@@ -476,6 +490,13 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
             String parameterName = params.get("parameter_name");
             String newType = params.get("new_type");
             sendResponse(exchange, endpointHandler.setParameterType(functionAddress, parameterName, newType));
+        });
+
+        server.createContext("/set_this_parameter_type", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String functionAddress = params.get("function_address");
+            String newType = params.get("new_type");
+            sendResponse(exchange, endpointHandler.setThisParameterType(functionAddress, newType));
         });
 
         server.createContext("/create_struct", exchange -> {
@@ -871,6 +892,28 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
             sendResponse(exchange, endpointHandler.runScript(scriptPath, args));
         });
 
+        server.createContext("/run_script_async", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String scriptPath = params.get("script_path");
+            String scriptName = params.get("script_name");
+            String args = params.get("args");
+            int timeoutSeconds = parseIntOrDefault(params.get("timeout_seconds"), 300);
+            boolean captureOutput = parseBooleanOrDefault(params.get("capture_output"), true);
+            sendResponse(exchange, endpointHandler.runScriptAsync(scriptPath, scriptName, args, timeoutSeconds, captureOutput));
+        });
+
+        server.createContext("/get_script_status", exchange -> {
+            Map<String, String> params = parseQueryParams(exchange);
+            String jobId = params.get("job_id");
+            sendResponse(exchange, endpointHandler.getScriptStatus(jobId));
+        });
+
+        server.createContext("/cancel_script", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String jobId = params.get("job_id");
+            sendResponse(exchange, endpointHandler.cancelScript(jobId));
+        });
+
         server.createContext("/list_scripts", exchange -> {
             Map<String, String> params = parseQueryParams(exchange);
             String filter = params.get("filter");
@@ -1002,7 +1045,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
 
     private int countEndpoints() {
         // Count contexts registered - this is an approximation
-        return 91; // 87 + 4 fuzzy matching/diff endpoints
+        return 99; // Includes async script + function lookup + this-parameter endpoints
     }
 
     public void stop() {
@@ -1020,6 +1063,10 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         if (programProvider != null) {
             System.out.println("Closing programs...");
             programProvider.closeAllPrograms();
+        }
+
+        if (endpointHandler != null) {
+            endpointHandler.shutdown();
         }
 
         System.out.println("Server stopped");

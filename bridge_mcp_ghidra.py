@@ -50,6 +50,12 @@ ENDPOINT_TIMEOUTS = {
     "find_similar_functions_fuzzy": 60,  # 1 minute - single function fuzzy search
     "diff_functions": 30,  # 30 seconds - structured function diff
     "get_function_signature": 10,  # 10 seconds - single signature extraction
+    "run_script_async": 15,  # quick job submission
+    "get_script_status": 10,  # quick status polling
+    "cancel_script": 10,  # quick cancellation request
+    "get_function_by_name": 15,  # lookup by name
+    "get_function_address": 15,  # resolve name -> address
+    "set_this_parameter_type": 45,  # may trigger signature fallback
     "default": 30,  # 30 seconds for all other operations
 }
 # Maximum retry attempts for transient failures (3 attempts with exponential backoff)
@@ -3246,7 +3252,23 @@ def create_struct(name: str, fields: list) -> str:
         - Structure names must be unique (not previously defined)
         - Use apply_data_type tool to apply the struct to memory locations
     """
-    return safe_post_json("create_struct", {"name": name, "fields": fields})
+    import json
+
+    normalized_fields = []
+    for field in fields or []:
+        if isinstance(field, str):
+            stripped = field.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, dict):
+                        normalized_fields.append(parsed)
+                        continue
+                except Exception:
+                    pass
+        normalized_fields.append(field)
+
+    return safe_post_json("create_struct", {"name": name, "fields": normalized_fields})
 
 
 @mcp.tool()

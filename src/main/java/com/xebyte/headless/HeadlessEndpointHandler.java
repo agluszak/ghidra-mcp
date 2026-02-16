@@ -37,6 +37,7 @@ import ghidra.util.task.TaskMonitor;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 import ghidra.program.model.mem.Memory;
@@ -52,10 +53,19 @@ public class HeadlessEndpointHandler {
 
     private static final String VERSION = "1.9.4-headless";
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
+    private static final long SCRIPT_JOB_RETENTION_MS = 60L * 60L * 1000L;
 
     private final ProgramProvider programProvider;
     private final ThreadingStrategy threadingStrategy;
     private final TaskMonitor monitor;
+    private final Map<String, ScriptJob> scriptJobs = new ConcurrentHashMap<>();
+    private final ExecutorService scriptJobExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "GhidraMCP-Headless-ScriptJob-" + SCRIPT_THREAD_COUNTER.incrementAndGet());
+        t.setDaemon(true);
+        return t;
+    });
+    private static final java.util.concurrent.atomic.AtomicInteger SCRIPT_THREAD_COUNTER =
+        new java.util.concurrent.atomic.AtomicInteger(0);
 
     public HeadlessEndpointHandler(ProgramProvider programProvider, ThreadingStrategy threadingStrategy) {
         this.programProvider = programProvider;
@@ -366,6 +376,95 @@ public class HeadlessEndpointHandler {
         sb.append("\"calling_convention\": \"").append(escapeJson(func.getCallingConventionName())).append("\"");
         sb.append("}");
         return sb.toString();
+    }
+
+    public String getFunctionByName(String functionName, String programName) {
+        Program program = getProgram(programName);
+        if (program == null) {
+            return getProgramError(programName);
+        }
+        if (functionName == null || functionName.isBlank()) {
+            return "{\"error\": \"Function name is required\"}";
+        }
+
+        List<Function> matches = findFunctionsByName(program, functionName);
+        if (matches.isEmpty()) {
+            return "{\"error\": \"No function found for name: " + escapeJson(functionName) + "\"}";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"query\": \"").append(escapeJson(functionName)).append("\",");
+        sb.append("\"count\": ").append(matches.size()).append(",");
+        sb.append("\"functions\": [");
+        for (int i = 0; i < matches.size(); i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            Function func = matches.get(i);
+            sb.append("{");
+            sb.append("\"name\": \"").append(escapeJson(func.getName())).append("\",");
+            sb.append("\"address\": \"").append(func.getEntryPoint().toString()).append("\",");
+            sb.append("\"signature\": \"").append(escapeJson(func.getSignature().getPrototypeString())).append("\",");
+            sb.append("\"calling_convention\": \"").append(escapeJson(func.getCallingConventionName())).append("\"");
+            sb.append("}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    public String getFunctionAddress(String functionName, String programName) {
+        Program program = getProgram(programName);
+        if (program == null) {
+            return getProgramError(programName);
+        }
+        if (functionName == null || functionName.isBlank()) {
+            return "{\"error\": \"Function name is required\"}";
+        }
+
+        List<Function> matches = findFunctionsByName(program, functionName);
+        if (matches.isEmpty()) {
+            return "{\"error\": \"No function found for name: " + escapeJson(functionName) + "\"}";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"query\": \"").append(escapeJson(functionName)).append("\",");
+        sb.append("\"count\": ").append(matches.size()).append(",");
+        sb.append("\"addresses\": [");
+        for (int i = 0; i < matches.size(); i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(matches.get(i).getEntryPoint().toString()).append("\"");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private List<Function> findFunctionsByName(Program program, String functionName) {
+        List<Function> exact = new ArrayList<>();
+        List<Function> caseInsensitive = new ArrayList<>();
+        List<Function> partial = new ArrayList<>();
+
+        for (Function f : program.getFunctionManager().getFunctions(true)) {
+            String name = f.getName();
+            if (name.equals(functionName)) {
+                exact.add(f);
+            } else if (name.equalsIgnoreCase(functionName)) {
+                caseInsensitive.add(f);
+            } else if (name.toLowerCase(Locale.ROOT).contains(functionName.toLowerCase(Locale.ROOT))) {
+                partial.add(f);
+            }
+        }
+
+        if (!exact.isEmpty()) {
+            return exact;
+        }
+        if (!caseInsensitive.isEmpty()) {
+            return caseInsensitive;
+        }
+        return partial;
     }
 
     // ==========================================================================
@@ -1551,6 +1650,36 @@ public class HeadlessEndpointHandler {
         }
     }
 
+    public String setThisParameterType(String functionAddress, String newType) {
+        String result = setParameterType(functionAddress, "this", newType);
+        if (!result.toLowerCase(Locale.ROOT).contains("not found")) {
+            return result;
+        }
+
+        Program program = getProgram(null);
+        if (program == null) {
+            return result;
+        }
+        Address addr = parseAddress(program, functionAddress);
+        if (addr == null) {
+            return result;
+        }
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        if (func == null) {
+            func = program.getFunctionManager().getFunctionContaining(addr);
+        }
+        if (func == null || func.getParameters().length == 0) {
+            return result;
+        }
+
+        String fallbackName = func.getParameters()[0].getName();
+        String fallbackResult = setParameterType(functionAddress, fallbackName, newType);
+        if (fallbackResult.toLowerCase(Locale.ROOT).startsWith("success:")) {
+            return fallbackResult + " (fallback from auto-parameter 'this' to '" + fallbackName + "')";
+        }
+        return result + " | Fallback attempted via '" + fallbackName + "': " + fallbackResult;
+    }
+
     private Parameter findParameterByName(Function func, String parameterName) {
         for (Parameter param : func.getParameters()) {
             if (param.getName().equals(parameterName)) {
@@ -1560,6 +1689,20 @@ public class HeadlessEndpointHandler {
         for (Parameter param : func.getParameters()) {
             if (param.getName().equalsIgnoreCase(parameterName)) {
                 return param;
+            }
+        }
+        if ("this".equalsIgnoreCase(parameterName)) {
+            for (Parameter param : func.getParameters()) {
+                String storage = param.getVariableStorage() != null
+                    ? param.getVariableStorage().toString().toUpperCase(Locale.ROOT)
+                    : "";
+                if (storage.contains("ECX") || storage.contains("RCX") || param.getName().toLowerCase(Locale.ROOT).contains("this")) {
+                    return param;
+                }
+            }
+            String cc = func.getCallingConventionName();
+            if (cc != null && cc.toLowerCase(Locale.ROOT).contains("thiscall") && func.getParameters().length > 0) {
+                return func.getParameters()[0];
             }
         }
         return null;
@@ -1844,6 +1987,14 @@ public class HeadlessEndpointHandler {
      */
     private Map<String, String> parseSimpleJsonObject(String json) {
         Map<String, String> result = new HashMap<>();
+
+        if (json == null || json.isEmpty()) {
+            return result;
+        }
+
+        // Handle stringified JSON objects with escaped quotes, e.g.:
+        // "{\"name\":\"field1\",\"type\":\"int\"}"
+        json = json.replace("\\\"", "\"");
 
         json = json.trim();
         if (!json.startsWith("{") || !json.endsWith("}")) {
@@ -3760,6 +3911,34 @@ public class HeadlessEndpointHandler {
     // PHASE 4: ADVANCED FEATURES ENDPOINTS
     // ==========================================================================
 
+    private static class ScriptJob {
+        final String jobId;
+        final String scriptPath;
+        final String scriptName;
+        final String args;
+        final int timeoutSeconds;
+        final boolean captureOutput;
+        final long createdAtMs;
+        volatile long startedAtMs;
+        volatile long finishedAtMs;
+        volatile boolean cancelRequested;
+        volatile String status;
+        volatile String result;
+        volatile String error;
+        volatile Future<?> future;
+
+        ScriptJob(String jobId, String scriptPath, String scriptName, String args, int timeoutSeconds, boolean captureOutput) {
+            this.jobId = jobId;
+            this.scriptPath = scriptPath;
+            this.scriptName = scriptName;
+            this.args = args;
+            this.timeoutSeconds = timeoutSeconds;
+            this.captureOutput = captureOutput;
+            this.createdAtMs = System.currentTimeMillis();
+            this.status = "queued";
+        }
+    }
+
     /**
      * Run a Ghidra script (simplified for headless mode)
      */
@@ -3786,16 +3965,254 @@ public class HeadlessEndpointHandler {
      * List available Ghidra scripts
      */
     public String listScripts(String filter) {
+        String normalizedFilter = filter == null ? "" : filter.trim().toLowerCase(Locale.ROOT);
+        List<Map<String, String>> scripts = new ArrayList<>();
+        Set<String> seenPaths = new HashSet<>();
+        List<File> dirs = getScriptSearchDirectories();
+        for (File dir : dirs) {
+            collectScriptsFromDirectory(dir, normalizedFilter, seenPaths, scripts, 0);
+        }
+        scripts.sort(Comparator.comparing(m -> m.getOrDefault("name", ""), String.CASE_INSENSITIVE_ORDER));
+
         StringBuilder result = new StringBuilder();
-        result.append("{\"scripts\": [],");
-        result.append("\"note\": \"Script listing in headless mode is limited.\",");
-        result.append("\"common_locations\": [");
-        result.append("\"<ghidra_install>/Ghidra/Features/*/ghidra_scripts/\",");
-        result.append("\"<user_home>/ghidra_scripts/\"");
+        result.append("{");
+        result.append("\"count\": ").append(scripts.size()).append(",");
+        result.append("\"filter\": ");
+        if (filter == null || filter.isBlank()) {
+            result.append("null,");
+        } else {
+            result.append("\"").append(escapeJson(filter)).append("\",");
+        }
+        result.append("\"script_directories\": [");
+        for (int i = 0; i < dirs.size(); i++) {
+            if (i > 0) {
+                result.append(",");
+            }
+            result.append("\"").append(escapeJson(dirs.get(i).getAbsolutePath())).append("\"");
+        }
         result.append("],");
-        result.append("\"filter\": ").append(filter != null ? "\"" + escapeJson(filter) + "\"" : "null");
-        result.append("}");
+        result.append("\"scripts\": [");
+        for (int i = 0; i < scripts.size(); i++) {
+            if (i > 0) {
+                result.append(",");
+            }
+            Map<String, String> script = scripts.get(i);
+            result.append("{");
+            result.append("\"name\": \"").append(escapeJson(script.getOrDefault("name", ""))).append("\",");
+            result.append("\"path\": \"").append(escapeJson(script.getOrDefault("path", ""))).append("\",");
+            result.append("\"language\": \"").append(escapeJson(script.getOrDefault("language", "Unknown"))).append("\",");
+            result.append("\"provider\": \"").append(escapeJson(script.getOrDefault("provider", "Unknown"))).append("\"");
+            result.append("}");
+        }
+        result.append("]}");
         return result.toString();
+    }
+
+    public String runScriptAsync(String scriptPath, String scriptName, String scriptArgs, int timeoutSeconds, boolean captureOutput) {
+        boolean hasPath = scriptPath != null && !scriptPath.isBlank();
+        boolean hasName = scriptName != null && !scriptName.isBlank();
+        if (!hasPath && !hasName) {
+            return "{\"error\": \"Either script_path or script_name is required\"}";
+        }
+
+        cleanupFinishedScriptJobs();
+        int safeTimeout = timeoutSeconds > 0 ? timeoutSeconds : 300;
+        String jobId = UUID.randomUUID().toString();
+        ScriptJob job = new ScriptJob(jobId, scriptPath, scriptName, scriptArgs, safeTimeout, captureOutput);
+        scriptJobs.put(jobId, job);
+
+        job.future = scriptJobExecutor.submit(() -> {
+            job.startedAtMs = System.currentTimeMillis();
+            job.status = "running";
+            try {
+                String scriptTarget = hasPath ? scriptPath : scriptName;
+                job.result = runScript(scriptTarget, scriptArgs);
+                if (job.cancelRequested || Thread.currentThread().isInterrupted()) {
+                    job.status = "cancelled";
+                    if (job.error == null) {
+                        job.error = "Cancelled";
+                    }
+                } else {
+                    job.status = "completed";
+                }
+            } catch (CancellationException e) {
+                job.status = "cancelled";
+                job.error = "Cancelled";
+            } catch (Throwable e) {
+                job.status = "failed";
+                job.error = e.getMessage() != null ? e.getMessage() : e.toString();
+            } finally {
+                job.finishedAtMs = System.currentTimeMillis();
+            }
+        });
+
+        return "{\"job_id\": \"" + escapeJson(jobId) + "\", \"status\": \"queued\"}";
+    }
+
+    public String getScriptStatus(String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return "{\"error\": \"job_id is required\"}";
+        }
+        ScriptJob job = scriptJobs.get(jobId);
+        if (job == null) {
+            return "{\"error\": \"Script job not found: " + escapeJson(jobId) + "\"}";
+        }
+        return scriptJobToJson(job);
+    }
+
+    public String cancelScript(String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return "{\"error\": \"job_id is required\"}";
+        }
+        ScriptJob job = scriptJobs.get(jobId);
+        if (job == null) {
+            return "{\"error\": \"Script job not found: " + escapeJson(jobId) + "\"}";
+        }
+        job.cancelRequested = true;
+        boolean cancelled = false;
+        Future<?> future = job.future;
+        if (future != null && !future.isDone()) {
+            cancelled = future.cancel(true);
+        }
+        if (cancelled) {
+            job.status = "cancelled";
+            job.finishedAtMs = System.currentTimeMillis();
+            if (job.error == null) {
+                job.error = "Cancelled by user";
+            }
+        }
+        return "{\"job_id\": \"" + escapeJson(jobId) + "\", \"cancel_requested\": true, \"cancelled\": " + cancelled + "}";
+    }
+
+    private void cleanupFinishedScriptJobs() {
+        long cutoff = System.currentTimeMillis() - SCRIPT_JOB_RETENTION_MS;
+        Iterator<Map.Entry<String, ScriptJob>> it = scriptJobs.entrySet().iterator();
+        while (it.hasNext()) {
+            ScriptJob job = it.next().getValue();
+            if (job.finishedAtMs > 0 && job.finishedAtMs < cutoff) {
+                it.remove();
+            }
+        }
+    }
+
+    private String scriptJobToJson(ScriptJob job) {
+        long now = System.currentTimeMillis();
+        long durationMs;
+        if (job.startedAtMs <= 0) {
+            durationMs = 0;
+        } else if (job.finishedAtMs > 0) {
+            durationMs = Math.max(0, job.finishedAtMs - job.startedAtMs);
+        } else {
+            durationMs = Math.max(0, now - job.startedAtMs);
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"job_id\": \"").append(escapeJson(job.jobId)).append("\",");
+        sb.append("\"status\": \"").append(escapeJson(job.status)).append("\",");
+        sb.append("\"cancel_requested\": ").append(job.cancelRequested).append(",");
+        sb.append("\"created_at_ms\": ").append(job.createdAtMs).append(",");
+        sb.append("\"started_at_ms\": ").append(job.startedAtMs).append(",");
+        sb.append("\"finished_at_ms\": ").append(job.finishedAtMs).append(",");
+        sb.append("\"duration_ms\": ").append(durationMs).append(",");
+        sb.append("\"script_path\": ");
+        if (job.scriptPath == null) {
+            sb.append("null,");
+        } else {
+            sb.append("\"").append(escapeJson(job.scriptPath)).append("\",");
+        }
+        sb.append("\"script_name\": ");
+        if (job.scriptName == null) {
+            sb.append("null");
+        } else {
+            sb.append("\"").append(escapeJson(job.scriptName)).append("\"");
+        }
+        if (job.error != null && !job.error.isEmpty()) {
+            sb.append(",\"error\": \"").append(escapeJson(job.error)).append("\"");
+        }
+        if (job.result != null && !job.result.isEmpty()) {
+            sb.append(",\"result\": \"").append(escapeJson(job.result)).append("\"");
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private List<File> getScriptSearchDirectories() {
+        LinkedHashSet<String> dirs = new LinkedHashSet<>();
+        dirs.add(System.getProperty("user.home") + File.separator + "ghidra_scripts");
+        dirs.add(System.getProperty("user.dir") + File.separator + "ghidra_scripts");
+
+        List<File> existingDirs = new ArrayList<>();
+        for (String path : dirs) {
+            File dir = new File(path);
+            if (dir.exists() && dir.isDirectory()) {
+                existingDirs.add(dir);
+            }
+        }
+        return existingDirs;
+    }
+
+    private void collectScriptsFromDirectory(
+        File directory,
+        String normalizedFilter,
+        Set<String> seenPaths,
+        List<Map<String, String>> scripts,
+        int depth
+    ) {
+        if (directory == null || depth > 12 || !directory.exists() || !directory.isDirectory()) {
+            return;
+        }
+        File[] children = directory.listFiles();
+        if (children == null || children.length == 0) {
+            return;
+        }
+        Arrays.sort(children, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
+        for (File child : children) {
+            if (child == null) {
+                continue;
+            }
+            if (child.isDirectory()) {
+                collectScriptsFromDirectory(child, normalizedFilter, seenPaths, scripts, depth + 1);
+                continue;
+            }
+            if (!isScriptFile(child.getName())) {
+                continue;
+            }
+            String absPath = child.getAbsolutePath();
+            if (!seenPaths.add(absPath)) {
+                continue;
+            }
+            String lowerName = child.getName().toLowerCase(Locale.ROOT);
+            String lowerPath = absPath.toLowerCase(Locale.ROOT);
+            if (!normalizedFilter.isEmpty() &&
+                !lowerName.contains(normalizedFilter) &&
+                !lowerPath.contains(normalizedFilter)) {
+                continue;
+            }
+            Map<String, String> script = new LinkedHashMap<>();
+            script.put("name", child.getName());
+            script.put("path", absPath);
+            String language = inferScriptLanguage(child.getName());
+            script.put("language", language);
+            script.put("provider", language + "ScriptProvider");
+            scripts.add(script);
+        }
+    }
+
+    private boolean isScriptFile(String fileName) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".java") || lower.endsWith(".py");
+    }
+
+    private String inferScriptLanguage(String fileName) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".java")) {
+            return "Java";
+        }
+        if (lower.endsWith(".py")) {
+            return "Python";
+        }
+        return "Unknown";
     }
 
     /**
@@ -4636,5 +5053,16 @@ public class HeadlessEndpointHandler {
         } catch (Exception e) {
             return "{\"error\": \"" + escapeJson(e.getMessage()) + "\"}";
         }
+    }
+
+    public void shutdown() {
+        for (ScriptJob job : scriptJobs.values()) {
+            Future<?> future = job.future;
+            if (future != null && !future.isDone()) {
+                future.cancel(true);
+            }
+        }
+        scriptJobs.clear();
+        scriptJobExecutor.shutdownNow();
     }
 }

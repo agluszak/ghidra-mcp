@@ -67,6 +67,7 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -78,7 +79,7 @@ class VersionInfo {
     private static String APP_NAME = "GhidraMCP";
     private static String BUILD_TIMESTAMP = "dev"; // Will be replaced by Maven
     private static String BUILD_NUMBER = "0"; // Will be replaced by Maven
-    private static final int ENDPOINT_COUNT = 134;
+    private static final int ENDPOINT_COUNT = 140;
     
     static {
         try (InputStream input = GhidraMCPPlugin.class
@@ -127,7 +128,7 @@ class VersionInfo {
     category = PluginCategoryNames.ANALYSIS,
     shortDescription = "GhidraMCP - HTTP server plugin",
     description = "GhidraMCP - Starts an embedded HTTP server to expose program data via REST API and MCP bridge. " +
-                  "Provides 134 endpoints for reverse engineering automation. " +
+                  "Provides 140 endpoints for reverse engineering automation. " +
                   "Port configurable via Tool Options. " +
                   "Features: function analysis, decompilation, symbol management, cross-references, label operations, " +
                   "high-performance batch data analysis, field-level structure analysis, advanced call graph analysis, " +
@@ -137,6 +138,7 @@ class VersionInfo {
 public class GhidraMCPPlugin extends Plugin {
 
     private HttpServer server;
+    private ExecutorService httpExecutor;
     private static final String OPTION_CATEGORY_NAME = "GhidraMCP HTTP Server";
     private static final String PORT_OPTION_NAME = "Server Port";
     private static final int DEFAULT_PORT = 8089;
@@ -154,6 +156,8 @@ public class GhidraMCPPlugin extends Plugin {
     private static final int HTTP_CONNECTION_TIMEOUT_SECONDS = 180;  // 3 minutes for connection timeout
     private static final int HTTP_IDLE_TIMEOUT_SECONDS = 300;        // 5 minutes for idle connections
     private static final int BATCH_OPERATION_CHUNK_SIZE = 20;        // Process batch operations in chunks of 20
+    private static final int HTTP_WORKER_THREADS = 16;
+    private static final long SCRIPT_JOB_RETENTION_MS = 60L * 60L * 1000L;
 
     // C language keywords to filter from field name suggestions
     private static final Set<String> C_KEYWORDS = Set.of(
@@ -163,6 +167,14 @@ public class GhidraMCPPlugin extends Plugin {
         "typedef", "sizeof", "const", "static", "extern", "auto", "register",
         "signed", "unsigned", "volatile", "inline", "restrict"
     );
+
+    private static final AtomicInteger SCRIPT_THREAD_COUNTER = new AtomicInteger(0);
+    private final Map<String, ScriptJob> scriptJobs = new ConcurrentHashMap<>();
+    private final ExecutorService scriptJobExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "GhidraMCP-ScriptJob-" + SCRIPT_THREAD_COUNTER.incrementAndGet());
+        t.setDaemon(true);
+        return t;
+    });
 
     public GhidraMCPPlugin(PluginTool tool) {
         super(tool);
@@ -212,6 +224,10 @@ public class GhidraMCPPlugin extends Plugin {
                 Msg.warn(this, "Interrupted while waiting for server to stop");
             }
             server = null;
+            if (httpExecutor != null) {
+                httpExecutor.shutdownNow();
+                httpExecutor = null;
+            }
         }
 
         // Create new server - if port is in use, try to handle gracefully
@@ -362,6 +378,20 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, getFunctionByAddress(address, programName));
         }));
 
+        server.createContext("/get_function_by_name", safeHandler(exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String name = qparams.get("name");
+            String programName = qparams.get("program");
+            sendResponse(exchange, getFunctionByName(name, programName));
+        }));
+
+        server.createContext("/get_function_address", safeHandler(exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String name = qparams.get("name");
+            String programName = qparams.get("program");
+            sendResponse(exchange, getFunctionAddress(name, programName));
+        }));
+
         server.createContext("/get_current_address", safeHandler(exchange -> {
             sendResponse(exchange, getCurrentAddress());
         }));
@@ -479,6 +509,22 @@ public class GhidraMCPPlugin extends Plugin {
                 sendResponse(exchange, result);
             } catch (Exception e) {
                 String errorMsg = "Error: Unexpected exception in set_parameter_type: " +
+                                 e.getClass().getSimpleName() + ": " + e.getMessage();
+                Msg.error(this, errorMsg, e);
+                sendResponse(exchange, errorMsg);
+            }
+        }));
+
+        server.createContext("/set_this_parameter_type", safeHandler(exchange -> {
+            try {
+                Map<String, Object> params = parseJsonParams(exchange);
+                String functionAddress = (String) params.get("function_address");
+                String newType = (String) params.get("new_type");
+
+                String result = setThisParameterType(functionAddress, newType);
+                sendResponse(exchange, result);
+            } catch (Exception e) {
+                String errorMsg = "Error: Unexpected exception in set_this_parameter_type: " +
                                  e.getClass().getSimpleName() + ": " + e.getMessage();
                 Msg.error(this, errorMsg, e);
                 sendResponse(exchange, errorMsg);
@@ -827,8 +873,8 @@ public class GhidraMCPPlugin extends Plugin {
                 if (fieldsObj instanceof String) {
                     fieldsJson = (String) fieldsObj;
                 } else if (fieldsObj instanceof java.util.List) {
-                    // Convert List to proper JSON array
-                    fieldsJson = serializeListToJson((java.util.List<?>) fieldsObj);
+                    // Convert List to proper JSON array, including stringified JSON field objects
+                    fieldsJson = serializeListToJson(normalizePossiblyStringifiedFieldList((java.util.List<?>) fieldsObj));
                 } else {
                     fieldsJson = fieldsObj != null ? fieldsObj.toString() : null;
                 }
@@ -929,7 +975,7 @@ public class GhidraMCPPlugin extends Plugin {
                     fieldsJson = (String) fieldsObj;
                 } else if (fieldsObj instanceof java.util.List) {
                     // Convert List to proper JSON array (same as create_struct)
-                    fieldsJson = serializeListToJson((java.util.List<?>) fieldsObj);
+                    fieldsJson = serializeListToJson(normalizePossiblyStringifiedFieldList((java.util.List<?>) fieldsObj));
                 } else {
                     fieldsJson = fieldsObj != null ? fieldsObj.toString() : null;
                 }
@@ -1610,6 +1656,45 @@ public class GhidraMCPPlugin extends Plugin {
             }
         }));
 
+        server.createContext("/run_script_async", safeHandler(exchange -> {
+            try {
+                Map<String, Object> params = parseJsonParams(exchange);
+                String scriptPath = (String) params.get("script_path");
+                String scriptName = (String) params.get("script_name");
+                String scriptArgs = (String) params.get("args");
+                int timeoutSeconds = params.get("timeout_seconds") != null
+                    ? ((Number) params.get("timeout_seconds")).intValue()
+                    : 300;
+                Object coObj = params.get("capture_output");
+                boolean captureOutput = coObj == null || Boolean.TRUE.equals(coObj) ||
+                    "true".equalsIgnoreCase(String.valueOf(coObj));
+                String result = runScriptAsync(scriptPath, scriptName, scriptArgs, timeoutSeconds, captureOutput);
+                sendResponse(exchange, result);
+            } catch (Throwable e) {
+                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+                sendResponse(exchange, "{\"error\": \"" + msg.replace("\"", "\\\"") + "\"}");
+            }
+        }));
+
+        server.createContext("/get_script_status", safeHandler(exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String jobId = qparams.get("job_id");
+            String result = getScriptStatus(jobId);
+            sendResponse(exchange, result);
+        }));
+
+        server.createContext("/cancel_script", safeHandler(exchange -> {
+            try {
+                Map<String, Object> params = parseJsonParams(exchange);
+                String jobId = (String) params.get("job_id");
+                String result = cancelScript(jobId);
+                sendResponse(exchange, result);
+            } catch (Throwable e) {
+                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+                sendResponse(exchange, "{\"error\": \"" + msg.replace("\"", "\\\"") + "\"}");
+            }
+        }));
+
         // BOOKMARK ENDPOINTS (v1.9.4) - Progress tracking via Ghidra bookmarks
         // SET_BOOKMARK - Create or update a bookmark at an address
         server.createContext("/set_bookmark", safeHandler(exchange -> {
@@ -1817,7 +1902,12 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         }));
 
-        server.setExecutor(null);
+        httpExecutor = Executors.newFixedThreadPool(HTTP_WORKER_THREADS, r -> {
+            Thread t = new Thread(r, "GhidraMCP-HTTP-" + UUID.randomUUID());
+            t.setDaemon(true);
+            return t;
+        });
+        server.setExecutor(httpExecutor);
         new Thread(() -> {
             try {
                 server.start();
@@ -2449,6 +2539,91 @@ public class GhidraMCPPlugin extends Plugin {
     // Backward compatibility overload
     private String getFunctionByAddress(String addressStr) {
         return getFunctionByAddress(addressStr, null);
+    }
+
+    private String getFunctionByName(String functionName, String programName) {
+        Object[] programResult = getProgramOrError(programName);
+        Program program = (Program) programResult[0];
+        if (program == null) return (String) programResult[1];
+        if (functionName == null || functionName.isBlank()) {
+            return "{\"error\": \"Function name is required\"}";
+        }
+
+        List<Function> matches = findFunctionsByName(program, functionName);
+        if (matches.isEmpty()) {
+            return "{\"error\": \"No function found for name: " + escapeJson(functionName) + "\"}";
+        }
+
+        StringBuilder result = new StringBuilder();
+        result.append("{\"query\": \"").append(escapeJson(functionName)).append("\",");
+        result.append("\"count\": ").append(matches.size()).append(",");
+        result.append("\"functions\": [");
+        for (int i = 0; i < matches.size(); i++) {
+            if (i > 0) {
+                result.append(",");
+            }
+            Function func = matches.get(i);
+            result.append("{");
+            result.append("\"name\": \"").append(escapeJson(func.getName())).append("\",");
+            result.append("\"address\": \"").append(func.getEntryPoint()).append("\",");
+            result.append("\"signature\": \"").append(escapeJson(func.getSignature().getPrototypeString())).append("\",");
+            result.append("\"calling_convention\": \"").append(escapeJson(func.getCallingConventionName())).append("\"");
+            result.append("}");
+        }
+        result.append("]}");
+        return result.toString();
+    }
+
+    private String getFunctionAddress(String functionName, String programName) {
+        Object[] programResult = getProgramOrError(programName);
+        Program program = (Program) programResult[0];
+        if (program == null) return (String) programResult[1];
+        if (functionName == null || functionName.isBlank()) {
+            return "{\"error\": \"Function name is required\"}";
+        }
+
+        List<Function> matches = findFunctionsByName(program, functionName);
+        if (matches.isEmpty()) {
+            return "{\"error\": \"No function found for name: " + escapeJson(functionName) + "\"}";
+        }
+
+        StringBuilder result = new StringBuilder();
+        result.append("{\"query\": \"").append(escapeJson(functionName)).append("\",");
+        result.append("\"count\": ").append(matches.size()).append(",");
+        result.append("\"addresses\": [");
+        for (int i = 0; i < matches.size(); i++) {
+            if (i > 0) {
+                result.append(",");
+            }
+            result.append("\"").append(matches.get(i).getEntryPoint()).append("\"");
+        }
+        result.append("]}");
+        return result.toString();
+    }
+
+    private List<Function> findFunctionsByName(Program program, String functionName) {
+        List<Function> exact = new ArrayList<>();
+        List<Function> caseInsensitive = new ArrayList<>();
+        List<Function> partial = new ArrayList<>();
+
+        for (Function f : program.getFunctionManager().getFunctions(true)) {
+            String name = f.getName();
+            if (name.equals(functionName)) {
+                exact.add(f);
+            } else if (name.equalsIgnoreCase(functionName)) {
+                caseInsensitive.add(f);
+            } else if (name.toLowerCase(Locale.ROOT).contains(functionName.toLowerCase(Locale.ROOT))) {
+                partial.add(f);
+            }
+        }
+
+        if (!exact.isEmpty()) {
+            return exact;
+        }
+        if (!caseInsensitive.isEmpty()) {
+            return caseInsensitive;
+        }
+        return partial;
     }
 
     /**
@@ -3330,6 +3505,40 @@ public class GhidraMCPPlugin extends Plugin {
         return resultMsg.length() > 0 ? resultMsg.toString() : "Error: Unknown failure";
     }
 
+    private String setThisParameterType(String functionAddrStr, String newType) {
+        String result = setParameterType(functionAddrStr, "this", newType);
+        if (!result.toLowerCase(Locale.ROOT).contains("not found")) {
+            return result;
+        }
+
+        Program program = getCurrentProgram();
+        if (program == null) {
+            return result;
+        }
+        try {
+            Address addr = program.getAddressFactory().getAddress(functionAddrStr);
+            if (addr == null) {
+                return result;
+            }
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) {
+                return result;
+            }
+            Parameter[] params = func.getParameters();
+            if (params.length == 0) {
+                return result;
+            }
+            String fallbackParam = params[0].getName();
+            String fallbackResult = setParameterType(functionAddrStr, fallbackParam, newType);
+            if (fallbackResult.toLowerCase(Locale.ROOT).startsWith("success:")) {
+                return fallbackResult + " (fallback from auto-parameter 'this' to '" + fallbackParam + "')";
+            }
+            return result + " | Fallback attempted via '" + fallbackParam + "': " + fallbackResult;
+        } catch (Exception ignored) {
+            return result;
+        }
+    }
+
     private Parameter findParameterByName(Function func, String parameterName) {
         Parameter[] params = func.getParameters();
         for (Parameter param : params) {
@@ -3340,6 +3549,20 @@ public class GhidraMCPPlugin extends Plugin {
         for (Parameter param : params) {
             if (param.getName().equalsIgnoreCase(parameterName)) {
                 return param;
+            }
+        }
+        if ("this".equalsIgnoreCase(parameterName)) {
+            for (Parameter param : params) {
+                String storage = param.getVariableStorage() != null
+                    ? param.getVariableStorage().toString().toUpperCase(Locale.ROOT)
+                    : "";
+                if (storage.contains("ECX") || storage.contains("RCX") || param.getName().toLowerCase(Locale.ROOT).contains("this")) {
+                    return param;
+                }
+            }
+            String cc = func.getCallingConventionName();
+            if (cc != null && cc.toLowerCase(Locale.ROOT).contains("thiscall") && params.length > 0) {
+                return params[0];
             }
         }
         return null;
@@ -3843,6 +4066,172 @@ public class GhidraMCPPlugin extends Plugin {
         return resultMsg.length() > 0 ? resultMsg.toString() : "Error: Unknown failure";
     }
 
+    private static class ScriptJob {
+        final String jobId;
+        final String scriptPath;
+        final String scriptName;
+        final String args;
+        final int timeoutSeconds;
+        final boolean captureOutput;
+        final long createdAtMs;
+        volatile long startedAtMs;
+        volatile long finishedAtMs;
+        volatile boolean cancelRequested;
+        volatile String status;
+        volatile String result;
+        volatile String error;
+        volatile Future<?> future;
+
+        ScriptJob(String jobId, String scriptPath, String scriptName, String args, int timeoutSeconds, boolean captureOutput) {
+            this.jobId = jobId;
+            this.scriptPath = scriptPath;
+            this.scriptName = scriptName;
+            this.args = args;
+            this.timeoutSeconds = timeoutSeconds;
+            this.captureOutput = captureOutput;
+            this.createdAtMs = System.currentTimeMillis();
+            this.status = "queued";
+        }
+    }
+
+    private String runScriptAsync(String scriptPath, String scriptName, String scriptArgs, int timeoutSeconds, boolean captureOutput) {
+        boolean hasPath = scriptPath != null && !scriptPath.isBlank();
+        boolean hasName = scriptName != null && !scriptName.isBlank();
+        if (!hasPath && !hasName) {
+            return "{\"error\": \"Either script_path or script_name is required\"}";
+        }
+        int safeTimeout = timeoutSeconds > 0 ? timeoutSeconds : 300;
+
+        cleanupFinishedScriptJobs();
+
+        String jobId = UUID.randomUUID().toString();
+        ScriptJob job = new ScriptJob(jobId, scriptPath, scriptName, scriptArgs, safeTimeout, captureOutput);
+        scriptJobs.put(jobId, job);
+
+        job.future = scriptJobExecutor.submit(() -> {
+            job.startedAtMs = System.currentTimeMillis();
+            job.status = "running";
+            try {
+                String output;
+                if (hasName) {
+                    output = runGhidraScriptWithCapture(scriptName, scriptArgs, safeTimeout, captureOutput);
+                } else {
+                    output = runGhidraScript(scriptPath, scriptArgs);
+                }
+
+                if (job.cancelRequested || Thread.currentThread().isInterrupted()) {
+                    job.status = "cancelled";
+                    if (job.error == null) {
+                        job.error = "Cancelled";
+                    }
+                } else {
+                    job.result = output;
+                    job.status = "completed";
+                }
+            } catch (CancellationException e) {
+                job.status = "cancelled";
+                job.error = "Cancelled";
+            } catch (Throwable e) {
+                job.status = "failed";
+                job.error = e.getMessage() != null ? e.getMessage() : e.toString();
+                Msg.error(this, "Async script execution failed for job " + jobId, e);
+            } finally {
+                job.finishedAtMs = System.currentTimeMillis();
+            }
+        });
+
+        return "{\"job_id\": \"" + jobId + "\", \"status\": \"queued\"}";
+    }
+
+    private String getScriptStatus(String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return "{\"error\": \"job_id is required\"}";
+        }
+        ScriptJob job = scriptJobs.get(jobId);
+        if (job == null) {
+            return "{\"error\": \"Script job not found: " + escapeJson(jobId) + "\"}";
+        }
+        return scriptJobToJson(job);
+    }
+
+    private String cancelScript(String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return "{\"error\": \"job_id is required\"}";
+        }
+        ScriptJob job = scriptJobs.get(jobId);
+        if (job == null) {
+            return "{\"error\": \"Script job not found: " + escapeJson(jobId) + "\"}";
+        }
+
+        job.cancelRequested = true;
+        boolean cancelled = false;
+        Future<?> future = job.future;
+        if (future != null && !future.isDone()) {
+            cancelled = future.cancel(true);
+        }
+        if (cancelled) {
+            job.status = "cancelled";
+            job.finishedAtMs = System.currentTimeMillis();
+            if (job.error == null) {
+                job.error = "Cancelled by user";
+            }
+        }
+        return "{\"job_id\": \"" + escapeJson(jobId) + "\", \"cancel_requested\": true, \"cancelled\": " + cancelled + "}";
+    }
+
+    private void cleanupFinishedScriptJobs() {
+        long cutoff = System.currentTimeMillis() - SCRIPT_JOB_RETENTION_MS;
+        Iterator<Map.Entry<String, ScriptJob>> it = scriptJobs.entrySet().iterator();
+        while (it.hasNext()) {
+            ScriptJob job = it.next().getValue();
+            if (job.finishedAtMs > 0 && job.finishedAtMs < cutoff) {
+                it.remove();
+            }
+        }
+    }
+
+    private String scriptJobToJson(ScriptJob job) {
+        long now = System.currentTimeMillis();
+        long durationMs;
+        if (job.startedAtMs <= 0) {
+            durationMs = 0;
+        } else if (job.finishedAtMs > 0) {
+            durationMs = Math.max(0, job.finishedAtMs - job.startedAtMs);
+        } else {
+            durationMs = Math.max(0, now - job.startedAtMs);
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"job_id\": \"").append(escapeJson(job.jobId)).append("\",");
+        sb.append("\"status\": \"").append(escapeJson(job.status)).append("\",");
+        sb.append("\"cancel_requested\": ").append(job.cancelRequested).append(",");
+        sb.append("\"created_at_ms\": ").append(job.createdAtMs).append(",");
+        sb.append("\"started_at_ms\": ").append(job.startedAtMs).append(",");
+        sb.append("\"finished_at_ms\": ").append(job.finishedAtMs).append(",");
+        sb.append("\"duration_ms\": ").append(durationMs).append(",");
+        sb.append("\"script_path\": ");
+        if (job.scriptPath == null) {
+            sb.append("null,");
+        } else {
+            sb.append("\"").append(escapeJson(job.scriptPath)).append("\",");
+        }
+        sb.append("\"script_name\": ");
+        if (job.scriptName == null) {
+            sb.append("null");
+        } else {
+            sb.append("\"").append(escapeJson(job.scriptName)).append("\"");
+        }
+        if (job.error != null && !job.error.isEmpty()) {
+            sb.append(",\"error\": \"").append(escapeJson(job.error)).append("\"");
+        }
+        if (job.result != null && !job.result.isEmpty()) {
+            sb.append(",\"result\": \"").append(escapeJson(job.result)).append("\"");
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
     /**
      * Run a Ghidra script programmatically (v1.7.0, fixed v2.0.1)
      *
@@ -4033,35 +4422,152 @@ public class GhidraMCPPlugin extends Plugin {
      * @return JSON list of available scripts
      */
     private String listGhidraScripts(String filter) {
-        final StringBuilder resultMsg = new StringBuilder();
+        String normalizedFilter = filter == null ? "" : filter.trim().toLowerCase(Locale.ROOT);
+        List<Map<String, String>> scripts = new ArrayList<>();
+        Set<String> seenPaths = new HashSet<>();
+        List<File> scriptDirs = getScriptSearchDirectories();
 
-        try {
-            SwingUtilities.invokeAndWait(() -> {
-                try {
-                    resultMsg.append("{\n  \"note\": \"Script listing requires Ghidra GUI access\",\n");
-                    resultMsg.append("  \"filter\": \"").append(filter != null ? filter : "none").append("\",\n");
-                    resultMsg.append("  \"instructions\": [\n");
-                    resultMsg.append("    \"To view available scripts:\",\n");
-                    resultMsg.append("    \"1. Open Ghidra's Script Manager (Window → Script Manager)\",\n");
-                    resultMsg.append("    \"2. Browse scripts by category\",\n");
-                    resultMsg.append("    \"3. Use the search filter at the top\"\n");
-                    resultMsg.append("  ],\n");
-                    resultMsg.append("  \"common_script_locations\": [\n");
-                    resultMsg.append("    \"<ghidra_install>/Ghidra/Features/*/ghidra_scripts/\",\n");
-                    resultMsg.append("    \"<user_home>/ghidra_scripts/\"\n");
-                    resultMsg.append("  ]\n");
-                    resultMsg.append("}");
-
-                } catch (Exception e) {
-                    resultMsg.append("Error: ").append(e.getMessage());
-                    Msg.error(this, "Error in list scripts handler", e);
-                }
-            });
-        } catch (InterruptedException | InvocationTargetException e) {
-            return "Error: Failed to execute on Swing thread: " + e.getMessage();
+        for (File dir : scriptDirs) {
+            collectScriptsFromDirectory(dir, normalizedFilter, seenPaths, scripts, 0);
         }
 
-        return resultMsg.toString();
+        scripts.sort(Comparator.comparing(m -> m.getOrDefault("name", ""), String.CASE_INSENSITIVE_ORDER));
+
+        StringBuilder result = new StringBuilder();
+        result.append("{");
+        result.append("\"count\": ").append(scripts.size()).append(",");
+        result.append("\"filter\": ");
+        if (filter == null || filter.isBlank()) {
+            result.append("null,");
+        } else {
+            result.append("\"").append(escapeJsonString(filter)).append("\",");
+        }
+        result.append("\"script_directories\": [");
+        for (int i = 0; i < scriptDirs.size(); i++) {
+            if (i > 0) {
+                result.append(",");
+            }
+            result.append("\"").append(escapeJsonString(scriptDirs.get(i).getAbsolutePath())).append("\"");
+        }
+        result.append("],");
+        result.append("\"scripts\": [");
+        for (int i = 0; i < scripts.size(); i++) {
+            if (i > 0) {
+                result.append(",");
+            }
+            Map<String, String> script = scripts.get(i);
+            result.append("{");
+            result.append("\"name\": \"").append(escapeJsonString(script.getOrDefault("name", ""))).append("\",");
+            result.append("\"path\": \"").append(escapeJsonString(script.getOrDefault("path", ""))).append("\",");
+            result.append("\"language\": \"").append(escapeJsonString(script.getOrDefault("language", "Unknown"))).append("\",");
+            result.append("\"provider\": \"").append(escapeJsonString(script.getOrDefault("provider", "Unknown"))).append("\"");
+            result.append("}");
+        }
+        result.append("]}");
+        return result.toString();
+    }
+
+    private List<File> getScriptSearchDirectories() {
+        LinkedHashSet<String> dirs = new LinkedHashSet<>();
+        try {
+            Object sourceDirsObj = GhidraScriptUtil.class.getMethod("getScriptSourceDirectories").invoke(null);
+            if (sourceDirsObj instanceof Iterable<?>) {
+                for (Object dirObj : (Iterable<?>) sourceDirsObj) {
+                    if (dirObj == null) {
+                        continue;
+                    }
+                    String path = null;
+                    try {
+                        Object absolutePath = dirObj.getClass().getMethod("getAbsolutePath").invoke(dirObj);
+                        if (absolutePath != null) {
+                            path = String.valueOf(absolutePath);
+                        }
+                    } catch (Exception ignored) {
+                        path = dirObj.toString();
+                    }
+                    if (path != null && !path.isBlank()) {
+                        dirs.add(path);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Could not query Ghidra script source directories", e);
+        }
+
+        dirs.add(System.getProperty("user.home") + File.separator + "ghidra_scripts");
+        dirs.add(System.getProperty("user.dir") + File.separator + "ghidra_scripts");
+
+        List<File> existingDirs = new ArrayList<>();
+        for (String path : dirs) {
+            File dir = new File(path);
+            if (dir.exists() && dir.isDirectory()) {
+                existingDirs.add(dir);
+            }
+        }
+        return existingDirs;
+    }
+
+    private void collectScriptsFromDirectory(
+        File directory,
+        String normalizedFilter,
+        Set<String> seenPaths,
+        List<Map<String, String>> scripts,
+        int depth
+    ) {
+        if (directory == null || depth > 12 || !directory.exists() || !directory.isDirectory()) {
+            return;
+        }
+        File[] children = directory.listFiles();
+        if (children == null || children.length == 0) {
+            return;
+        }
+        Arrays.sort(children, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
+        for (File child : children) {
+            if (child == null) {
+                continue;
+            }
+            if (child.isDirectory()) {
+                collectScriptsFromDirectory(child, normalizedFilter, seenPaths, scripts, depth + 1);
+                continue;
+            }
+            if (!isScriptFile(child.getName())) {
+                continue;
+            }
+            String absPath = child.getAbsolutePath();
+            if (!seenPaths.add(absPath)) {
+                continue;
+            }
+            String lowerName = child.getName().toLowerCase(Locale.ROOT);
+            String lowerPath = absPath.toLowerCase(Locale.ROOT);
+            if (!normalizedFilter.isEmpty() &&
+                !lowerName.contains(normalizedFilter) &&
+                !lowerPath.contains(normalizedFilter)) {
+                continue;
+            }
+            Map<String, String> script = new LinkedHashMap<>();
+            script.put("name", child.getName());
+            script.put("path", absPath);
+            String language = inferScriptLanguage(child.getName());
+            script.put("language", language);
+            script.put("provider", language + "ScriptProvider");
+            scripts.add(script);
+        }
+    }
+
+    private boolean isScriptFile(String fileName) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".java") || lower.endsWith(".py");
+    }
+
+    private String inferScriptLanguage(String fileName) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".java")) {
+            return "Java";
+        }
+        if (lower.endsWith(".py")) {
+            return "Python";
+        }
+        return "Unknown";
     }
 
     /**
@@ -8099,6 +8605,25 @@ public class GhidraMCPPlugin extends Plugin {
      * Serialize a List of objects to proper JSON string
      * Handles Map objects within the list
      */
+    private java.util.List<?> normalizePossiblyStringifiedFieldList(java.util.List<?> list) {
+        java.util.List<Object> normalized = new java.util.ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof String) {
+                String text = ((String) item).trim();
+                if (text.startsWith("{") && text.endsWith("}")) {
+                    String objectBody = text.substring(1, text.length() - 1);
+                    java.util.Map<String, String> parsed = parseJsonKeyValues(objectBody);
+                    if (!parsed.isEmpty()) {
+                        normalized.add(parsed);
+                        continue;
+                    }
+                }
+            }
+            normalized.add(item);
+        }
+        return normalized;
+    }
+
     private String serializeListToJson(java.util.List<?> list) {
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < list.size(); i++) {
@@ -16284,6 +16809,14 @@ public class GhidraMCPPlugin extends Plugin {
 
     @Override
     public void dispose() {
+        for (ScriptJob job : scriptJobs.values()) {
+            Future<?> future = job.future;
+            if (future != null && !future.isDone()) {
+                future.cancel(true);
+            }
+        }
+        scriptJobs.clear();
+        scriptJobExecutor.shutdownNow();
         if (server != null) {
             Msg.info(this, "Stopping GhidraMCP HTTP server...");
             try {
@@ -16295,6 +16828,10 @@ public class GhidraMCPPlugin extends Plugin {
             }
             server = null; // Nullify the reference
             Msg.info(this, "GhidraMCP HTTP server stopped.");
+        }
+        if (httpExecutor != null) {
+            httpExecutor.shutdownNow();
+            httpExecutor = null;
         }
         super.dispose();
     }
