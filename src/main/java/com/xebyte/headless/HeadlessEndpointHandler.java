@@ -1468,6 +1468,212 @@ public class HeadlessEndpointHandler {
     }
 
     /**
+     * Set a function parameter's type.
+     * Includes a signature-application fallback for auto-parameters (for example, this/ECX).
+     */
+    public String setParameterType(String functionAddress, String parameterName, String newType) {
+        Program program = getProgram(null);
+        if (program == null) {
+            return "Error: No program loaded";
+        }
+
+        if (functionAddress == null || functionAddress.isEmpty()) {
+            return "Error: Function address is required";
+        }
+        if (parameterName == null || parameterName.isEmpty()) {
+            return "Error: Parameter name is required";
+        }
+        if (newType == null || newType.isEmpty()) {
+            return "Error: New type is required";
+        }
+
+        Address addr = parseAddress(program, functionAddress);
+        if (addr == null) {
+            return "Error: Invalid address: " + functionAddress;
+        }
+
+        try {
+            return threadingStrategy.executeWrite(program, "Set parameter type", () -> {
+                Function func = program.getFunctionManager().getFunctionAt(addr);
+                if (func == null) {
+                    func = program.getFunctionManager().getFunctionContaining(addr);
+                }
+                if (func == null) {
+                    return "Error: No function found at address: " + functionAddress;
+                }
+
+                Parameter targetParam = findParameterByName(func, parameterName);
+                if (targetParam == null) {
+                    return "Error: Parameter '" + parameterName + "' not found. Available parameters: " +
+                           describeAvailableParameters(func);
+                }
+
+                DataType dataType = findDataType(program.getDataTypeManager(), newType);
+                if (dataType == null) {
+                    return "Error: Data type not found: " + newType;
+                }
+
+                String oldType = targetParam.getDataType() != null
+                    ? targetParam.getDataType().getName()
+                    : "unknown";
+
+                try {
+                    targetParam.setDataType(dataType, SourceType.USER_DEFINED);
+                    return "Success: Set type of parameter '" + parameterName + "' from '" +
+                           oldType + "' to '" + dataType.getName() + "'";
+                } catch (Exception directError) {
+                    String prototype = buildPrototypeWithUpdatedParameter(func, targetParam, dataType);
+                    String callingConvention = normalizeCallingConvention(func.getCallingConventionName());
+                    String fallbackError = applyPrototypeUpdate(program, func, prototype, callingConvention);
+
+                    if (fallbackError == null) {
+                        return "Success: Set type of parameter '" + parameterName + "' from '" +
+                               oldType + "' to '" + dataType.getName() +
+                               "' (applied via function signature fallback)";
+                    }
+
+                    StringBuilder error = new StringBuilder();
+                    error.append("Error: Failed to set type for parameter '").append(parameterName).append("'");
+                    error.append(". Direct update failed: ").append(directError.getMessage());
+                    error.append(". Signature fallback failed: ").append(fallbackError);
+
+                    if ("this".equals(parameterName) ||
+                        (directError.getMessage() != null &&
+                         directError.getMessage().toLowerCase().contains("auto-parameter"))) {
+                        error.append(". Note: This appears to be an auto-parameter; manual decompiler retype may still be required.");
+                    }
+
+                    return error.toString();
+                }
+            });
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    private Parameter findParameterByName(Function func, String parameterName) {
+        for (Parameter param : func.getParameters()) {
+            if (param.getName().equals(parameterName)) {
+                return param;
+            }
+        }
+        for (Parameter param : func.getParameters()) {
+            if (param.getName().equalsIgnoreCase(parameterName)) {
+                return param;
+            }
+        }
+        return null;
+    }
+
+    private String describeAvailableParameters(Function func) {
+        Parameter[] params = func.getParameters();
+        if (params.length == 0) {
+            return "(none)";
+        }
+
+        StringJoiner joiner = new StringJoiner(", ");
+        for (Parameter param : params) {
+            String typeName = (param.getDataType() != null) ? param.getDataType().getName() : "unknown";
+            String storage = (param.getVariableStorage() != null)
+                ? param.getVariableStorage().toString()
+                : "unknown";
+            joiner.add(param.getName() + ":" + typeName + " (" + storage + ")");
+        }
+        return joiner.toString();
+    }
+
+    private String buildPrototypeWithUpdatedParameter(Function func, Parameter targetParam, DataType newType) {
+        Parameter[] params = func.getParameters();
+        String functionName = sanitizePrototypeIdentifier(func.getName(), "mcp_function");
+
+        StringBuilder prototype = new StringBuilder();
+        prototype.append(formatDataTypeForPrototype(func.getReturnType()))
+                 .append(" ")
+                 .append(functionName)
+                 .append("(");
+
+        if (params.length == 0) {
+            prototype.append("void");
+        } else {
+            for (int i = 0; i < params.length; i++) {
+                if (i > 0) {
+                    prototype.append(", ");
+                }
+                Parameter param = params[i];
+                DataType paramType = (param == targetParam) ? newType : param.getDataType();
+                String paramName = sanitizePrototypeIdentifier(param.getName(), "param_" + i);
+
+                prototype.append(formatDataTypeForPrototype(paramType))
+                         .append(" ")
+                         .append(paramName);
+            }
+        }
+
+        prototype.append(")");
+        return prototype.toString();
+    }
+
+    private String formatDataTypeForPrototype(DataType dataType) {
+        if (dataType == null) {
+            return "void";
+        }
+        String displayName = dataType.getDisplayName();
+        if (displayName == null || displayName.isEmpty()) {
+            displayName = dataType.getName();
+        }
+        return (displayName == null || displayName.isEmpty()) ? "void" : displayName;
+    }
+
+    private String sanitizePrototypeIdentifier(String candidate, String fallback) {
+        if (candidate == null || candidate.isBlank()) {
+            return fallback;
+        }
+        String sanitized = candidate.replaceAll("[^A-Za-z0-9_]", "_");
+        if (sanitized.isEmpty()) {
+            sanitized = fallback;
+        }
+        if (Character.isDigit(sanitized.charAt(0))) {
+            sanitized = "_" + sanitized;
+        }
+        return sanitized;
+    }
+
+    private String normalizeCallingConvention(String callingConvention) {
+        if (callingConvention == null || callingConvention.isEmpty()) {
+            return null;
+        }
+        if ("unknown".equalsIgnoreCase(callingConvention) ||
+            "default".equalsIgnoreCase(callingConvention)) {
+            return null;
+        }
+        return callingConvention;
+    }
+
+    private String applyPrototypeUpdate(Program program, Function func, String prototype, String callingConvention) {
+        try {
+            DataTypeManager dtm = program.getDataTypeManager();
+            ghidra.app.util.parser.FunctionSignatureParser parser =
+                new ghidra.app.util.parser.FunctionSignatureParser(dtm, null);
+
+            ghidra.program.model.data.FunctionDefinitionDataType sig = parser.parse(null, prototype);
+            ghidra.app.cmd.function.ApplyFunctionSignatureCmd cmd =
+                new ghidra.app.cmd.function.ApplyFunctionSignatureCmd(
+                    func.getEntryPoint(), sig, SourceType.USER_DEFINED);
+
+            if (!cmd.applyTo(program, monitor)) {
+                return "Failed to apply signature: " + cmd.getStatusMsg();
+            }
+
+            if (callingConvention != null) {
+                func.setCallingConvention(callingConvention);
+            }
+            return null;
+        } catch (Exception e) {
+            return e.getMessage();
+        }
+    }
+
+    /**
      * Find a data type by name in the data type manager.
      */
     private DataType findDataType(DataTypeManager dtm, String typeName) {

@@ -1,12 +1,13 @@
 """
 Phase 1: Essential Analysis Endpoints Tests
 
-Tests for the 9 Phase 1 endpoints:
+Tests for the 10 Phase 1 endpoints:
 - get_function_callees
 - get_function_callers
 - get_function_variables
 - set_function_prototype
 - set_local_variable_type
+- set_parameter_type
 - create_struct
 - apply_data_type
 - batch_rename_variables
@@ -167,6 +168,34 @@ class TestVariableType:
             "new_type": "int"
         })
         # Accept 200 with error, 400 (bad request), or 500 (server error)
+        assert response.status_code in [200, 400, 500]
+        if response.status_code == 200:
+            assert "error" in response.text.lower()
+
+
+class TestParameterType:
+    """Test parameter type modification."""
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_set_parameter_type(self, http_client, sample_address):
+        """Test setting parameter type (may fail if parameter doesn't exist)."""
+        response = http_client.post("/set_parameter_type", json_data={
+            "function_address": sample_address,
+            "parameter_name": "param_1",
+            "new_type": "int"
+        })
+        assert response.status_code == 200
+        assert "success" in response.text.lower() or "error" in response.text.lower()
+
+    @pytest.mark.requires_program
+    def test_set_parameter_type_invalid_address(self, http_client):
+        """Test parameter type with invalid address."""
+        response = http_client.post("/set_parameter_type", json_data={
+            "function_address": "invalid",
+            "parameter_name": "param_1",
+            "new_type": "int"
+        })
         assert response.status_code in [200, 400, 500]
         if response.status_code == 200:
             assert "error" in response.text.lower()

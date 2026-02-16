@@ -1,7 +1,7 @@
 {
   "version": "1.9.4",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 127,
+  "total_endpoints": 128,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -92,6 +92,7 @@
 
     {"path": "/set_function_prototype", "method": "POST", "category": "datatype", "params": ["function_address", "prototype", "calling_convention"], "description": "Set function prototype"},
     {"path": "/set_local_variable_type", "method": "POST", "category": "datatype", "params": ["function_address", "variable_name", "new_type"], "description": "Set variable type"},
+    {"path": "/set_parameter_type", "method": "POST", "category": "datatype", "params": ["function_address", "parameter_name", "new_type"], "description": "Set parameter type"},
     {"path": "/set_variable_storage", "method": "POST", "category": "datatype", "params": ["function_address", "variable_name", "storage"], "description": "Set variable storage"},
     {"path": "/batch_set_variable_types", "method": "POST", "category": "datatype", "params": ["function_address", "variable_types"], "description": "Set multiple variable types"},
     {"path": "/set_function_no_return", "method": "POST", "category": "datatype", "params": ["function_address", "no_return"], "description": "Set no-return attribute"},

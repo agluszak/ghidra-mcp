@@ -91,6 +91,14 @@ class TestServerUrlValidation:
         assert validate_server_url("ftp://localhost:21/") is False
         assert validate_server_url("file:///etc/passwd") is False
 
+    def test_normalize_request_url_collapses_double_slash(self):
+        """URL path normalization should collapse duplicate slashes."""
+        from bridge_mcp_ghidra import normalize_request_url
+
+        raw = "http://127.0.0.1:8089//find_undocumented_by_string"
+        normalized = normalize_request_url(raw)
+        assert normalized == "http://127.0.0.1:8089/find_undocumented_by_string"
+
 
 class TestTimeoutCalculation:
     """Tests for dynamic timeout calculation."""
@@ -239,6 +247,22 @@ class TestMockedHTTPRequests:
         parsed = json.loads(result)
         assert parsed["key"] == "value"
         assert parsed["count"] == 42
+
+    @patch("bridge_mcp_ghidra.session")
+    def test_make_request_normalizes_double_slash_path(self, mock_session):
+        """make_request should normalize accidental // in endpoint path."""
+        from bridge_mcp_ghidra import make_request
+
+        mock_response = MagicMock()
+        mock_response.ok = True
+        mock_response.text = "{}"
+        mock_session.get.return_value = mock_response
+
+        result = make_request("http://127.0.0.1:8089//batch_string_anchor_report")
+        assert result == "{}"
+
+        called_url = mock_session.get.call_args[0][0]
+        assert called_url == "http://127.0.0.1:8089/batch_string_anchor_report"
 
 
 class TestErrorClasses:

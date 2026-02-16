@@ -78,7 +78,7 @@ class VersionInfo {
     private static String APP_NAME = "GhidraMCP";
     private static String BUILD_TIMESTAMP = "dev"; // Will be replaced by Maven
     private static String BUILD_NUMBER = "0"; // Will be replaced by Maven
-    private static final int ENDPOINT_COUNT = 133;
+    private static final int ENDPOINT_COUNT = 134;
     
     static {
         try (InputStream input = GhidraMCPPlugin.class
@@ -127,7 +127,7 @@ class VersionInfo {
     category = PluginCategoryNames.ANALYSIS,
     shortDescription = "GhidraMCP - HTTP server plugin",
     description = "GhidraMCP - Starts an embedded HTTP server to expose program data via REST API and MCP bridge. " +
-                  "Provides 133 endpoints for reverse engineering automation. " +
+                  "Provides 134 endpoints for reverse engineering automation. " +
                   "Port configurable via Tool Options. " +
                   "Features: function analysis, decompilation, symbol management, cross-references, label operations, " +
                   "high-performance batch data analysis, field-level structure analysis, advanced call graph analysis, " +
@@ -462,6 +462,23 @@ public class GhidraMCPPlugin extends Plugin {
             } catch (Exception e) {
                 // Catch any uncaught exceptions to prevent 500 errors
                 String errorMsg = "Error: Unexpected exception in set_local_variable_type: " +
+                                 e.getClass().getSimpleName() + ": " + e.getMessage();
+                Msg.error(this, errorMsg, e);
+                sendResponse(exchange, errorMsg);
+            }
+        }));
+
+        server.createContext("/set_parameter_type", safeHandler(exchange -> {
+            try {
+                Map<String, Object> params = parseJsonParams(exchange);
+                String functionAddress = (String) params.get("function_address");
+                String parameterName = (String) params.get("parameter_name");
+                String newType = (String) params.get("new_type");
+
+                String result = setParameterType(functionAddress, parameterName, newType);
+                sendResponse(exchange, result);
+            } catch (Exception e) {
+                String errorMsg = "Error: Unexpected exception in set_parameter_type: " +
                                  e.getClass().getSimpleName() + ": " + e.getMessage();
                 Msg.error(this, errorMsg, e);
                 sendResponse(exchange, errorMsg);
@@ -3182,6 +3199,226 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
+     * Set a function parameter type.
+     * Includes a signature-application fallback for auto-parameters (for example, this/ECX).
+     */
+    private String setParameterType(String functionAddrStr, String parameterName, String newType) {
+        Program program = getCurrentProgram();
+        if (program == null) {
+            return "Error: No program loaded";
+        }
+        if (functionAddrStr == null || functionAddrStr.isEmpty()) {
+            return "Error: Function address is required";
+        }
+        if (parameterName == null || parameterName.isEmpty()) {
+            return "Error: Parameter name is required";
+        }
+        if (newType == null || newType.isEmpty()) {
+            return "Error: New type is required";
+        }
+
+        final StringBuilder resultMsg = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                try {
+                    Address addr = program.getAddressFactory().getAddress(functionAddrStr);
+                    if (addr == null) {
+                        resultMsg.append("Error: Invalid address: ").append(functionAddrStr);
+                        return;
+                    }
+
+                    Function func = getFunctionForAddress(program, addr);
+                    if (func == null) {
+                        resultMsg.append("Error: No function found at address ").append(functionAddrStr);
+                        return;
+                    }
+
+                    Parameter targetParam = findParameterByName(func, parameterName);
+                    if (targetParam == null) {
+                        resultMsg.append("Error: Parameter '").append(parameterName)
+                                 .append("' not found in function. Available parameters: ")
+                                 .append(describeAvailableParameters(func));
+                        return;
+                    }
+
+                    DataType dataType = resolveDataType(program.getDataTypeManager(), newType);
+                    if (dataType == null) {
+                        resultMsg.append("Error: Could not resolve data type: ").append(newType);
+                        return;
+                    }
+
+                    String oldType = targetParam.getDataType() != null
+                        ? targetParam.getDataType().getName()
+                        : "unknown";
+
+                    boolean directSuccess = false;
+                    String directError = null;
+                    int tx = program.startTransaction("Set parameter type");
+                    try {
+                        targetParam.setDataType(dataType, SourceType.USER_DEFINED);
+                        directSuccess = true;
+                    } catch (Exception e) {
+                        directError = e.getMessage();
+                        Msg.warn(this, "Direct parameter type update failed for '" + parameterName +
+                                      "' in " + func.getName() + ": " + e.getMessage());
+                    } finally {
+                        program.endTransaction(tx, directSuccess);
+                    }
+
+                    if (directSuccess) {
+                        resultMsg.append("Success: Changed type of parameter '").append(parameterName)
+                                 .append("' from '").append(oldType).append("' to '")
+                                 .append(dataType.getName()).append("'");
+                        return;
+                    }
+
+                    String updatedPrototype = buildPrototypeWithUpdatedParameter(func, targetParam, dataType);
+                    AtomicBoolean fallbackSuccess = new AtomicBoolean(false);
+                    StringBuilder fallbackError = new StringBuilder();
+
+                    String callingConvention = func.getCallingConventionName();
+                    if (callingConvention != null &&
+                        ("unknown".equalsIgnoreCase(callingConvention) ||
+                         "default".equalsIgnoreCase(callingConvention))) {
+                        callingConvention = null;
+                    }
+
+                    parseFunctionSignatureAndApply(
+                        program,
+                        func.getEntryPoint(),
+                        updatedPrototype,
+                        callingConvention,
+                        fallbackSuccess,
+                        fallbackError
+                    );
+
+                    if (fallbackSuccess.get()) {
+                        resultMsg.append("Success: Changed type of parameter '").append(parameterName)
+                                 .append("' from '").append(oldType).append("' to '")
+                                 .append(dataType.getName())
+                                 .append("' (applied via function signature fallback)");
+                        return;
+                    }
+
+                    resultMsg.append("Error: Failed to set type for parameter '")
+                             .append(parameterName).append("'");
+
+                    if (directError != null && !directError.isEmpty()) {
+                        resultMsg.append(". Direct update failed: ").append(directError);
+                    }
+                    if (fallbackError.length() > 0) {
+                        resultMsg.append(". Signature fallback failed: ").append(fallbackError);
+                    }
+
+                    if ("this".equals(parameterName) ||
+                        (directError != null && directError.toLowerCase().contains("auto-parameter"))) {
+                        resultMsg.append(". Note: This appears to be an auto-parameter; some Ghidra builds still ")
+                                 .append("restrict direct overrides. Manual decompiler retype may still be required.");
+                    }
+
+                } catch (Exception e) {
+                    resultMsg.append("Error: ").append(e.getMessage());
+                    Msg.error(this, "Error setting parameter type", e);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            resultMsg.append("Error: Failed to execute on Swing thread: ").append(e.getMessage());
+            Msg.error(this, "Failed to execute set parameter type on Swing thread", e);
+        }
+
+        return resultMsg.length() > 0 ? resultMsg.toString() : "Error: Unknown failure";
+    }
+
+    private Parameter findParameterByName(Function func, String parameterName) {
+        Parameter[] params = func.getParameters();
+        for (Parameter param : params) {
+            if (param.getName().equals(parameterName)) {
+                return param;
+            }
+        }
+        for (Parameter param : params) {
+            if (param.getName().equalsIgnoreCase(parameterName)) {
+                return param;
+            }
+        }
+        return null;
+    }
+
+    private String buildPrototypeWithUpdatedParameter(Function func, Parameter targetParam, DataType newType) {
+        Parameter[] params = func.getParameters();
+        String functionName = sanitizePrototypeIdentifier(func.getName(), "mcp_function");
+
+        StringBuilder prototype = new StringBuilder();
+        prototype.append(formatDataTypeForPrototype(func.getReturnType()))
+                 .append(" ")
+                 .append(functionName)
+                 .append("(");
+
+        if (params.length == 0) {
+            prototype.append("void");
+        } else {
+            for (int i = 0; i < params.length; i++) {
+                if (i > 0) {
+                    prototype.append(", ");
+                }
+                Parameter param = params[i];
+                DataType paramType = (param == targetParam) ? newType : param.getDataType();
+                String paramName = sanitizePrototypeIdentifier(param.getName(), "param_" + i);
+
+                prototype.append(formatDataTypeForPrototype(paramType))
+                         .append(" ")
+                         .append(paramName);
+            }
+        }
+
+        prototype.append(")");
+        return prototype.toString();
+    }
+
+    private String formatDataTypeForPrototype(DataType dataType) {
+        if (dataType == null) {
+            return "void";
+        }
+        String displayName = dataType.getDisplayName();
+        if (displayName == null || displayName.isEmpty()) {
+            displayName = dataType.getName();
+        }
+        return (displayName == null || displayName.isEmpty()) ? "void" : displayName;
+    }
+
+    private String sanitizePrototypeIdentifier(String candidate, String fallback) {
+        if (candidate == null || candidate.isBlank()) {
+            return fallback;
+        }
+        String sanitized = candidate.replaceAll("[^A-Za-z0-9_]", "_");
+        if (sanitized.isEmpty()) {
+            sanitized = fallback;
+        }
+        if (Character.isDigit(sanitized.charAt(0))) {
+            sanitized = "_" + sanitized;
+        }
+        return sanitized;
+    }
+
+    private String describeAvailableParameters(Function func) {
+        Parameter[] params = func.getParameters();
+        if (params.length == 0) {
+            return "(none)";
+        }
+
+        StringJoiner joiner = new StringJoiner(", ");
+        for (Parameter param : params) {
+            String typeName = (param.getDataType() != null) ? param.getDataType().getName() : "unknown";
+            String storage = (param.getVariableStorage() != null)
+                ? param.getVariableStorage().toString()
+                : "unknown";
+            joiner.add(param.getName() + ":" + typeName + " (" + storage + ")");
+        }
+        return joiner.toString();
+    }
+
+    /**
      * Find a high symbol by name in the given high function
      */
     private HighSymbol findSymbolByName(ghidra.program.model.pcode.HighFunction highFunction, String variableName) {
@@ -3321,6 +3558,7 @@ public class GhidraMCPPlugin extends Plugin {
                 msg = "Cannot set type for register-based variable '" + symbol.getName() +
                       "' at storage location: " + storageInfo + ". " +
                       "Register variables (ESP/EDI/EAX/etc) are decompiler temporaries and cannot have types set via API. " +
+                      "If this is a function parameter (for example, 'this'), use set_parameter_type first. " +
                       "Workaround: Manually retype this variable in Ghidra's decompiler UI (right-click → Retype Variable). " +
                       "Ghidra limitation: " + e.getMessage();
             } else {

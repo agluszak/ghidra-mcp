@@ -136,6 +136,24 @@ def validate_server_url(url: str) -> bool:
         return False
 
 
+def normalize_request_url(url: str) -> str:
+    """
+    Normalize URL path to avoid accidental double slashes in endpoint paths.
+
+    Example:
+        http://127.0.0.1:8089//find_undocumented_by_string
+        -> http://127.0.0.1:8089/find_undocumented_by_string
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return url
+        normalized_path = re.sub(r"/{2,}", "/", parsed.path) if parsed.path else ""
+        return parsed._replace(path=normalized_path).geturl()
+    except Exception:
+        return url
+
+
 def get_timeout_for_endpoint(endpoint: str) -> int:
     """Get the appropriate timeout for a specific endpoint"""
     # Extract endpoint name from URL path
@@ -1064,6 +1082,12 @@ def make_request(
     """
     if params is None:
         params = {}
+
+    # Normalize accidental duplicate slashes in paths (e.g. ...//endpoint)
+    normalized_url = normalize_request_url(url)
+    if normalized_url != url:
+        logger.debug(f"Normalized request URL: {url} -> {normalized_url}")
+    url = normalized_url
 
     # Validate server URL for security
     if not validate_server_url(url):
@@ -5622,12 +5646,15 @@ def search_memory_strings(
     """
     if not query:
         raise GhidraValidationError("Query string is required")
-    
-    url = f"{ghidra_server_url}/search_strings"
+
+    # Backend compatibility:
+    # The current Java server exposes list_strings(filter=...) but not search_strings.
+    # Keep this tool available by mapping query -> filter.
+    url = f"{ghidra_server_url}/list_strings"
     params = {
-        "query": query,
+        "filter": query,
         "min_length": min_length,
-        "encoding": encoding
+        "encoding": encoding,
     }
     if program:
         params["program"] = program

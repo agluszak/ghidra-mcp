@@ -470,6 +470,14 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
             sendResponse(exchange, endpointHandler.setLocalVariableType(functionAddress, variableName, newType));
         });
 
+        server.createContext("/set_parameter_type", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String functionAddress = params.get("function_address");
+            String parameterName = params.get("parameter_name");
+            String newType = params.get("new_type");
+            sendResponse(exchange, endpointHandler.setParameterType(functionAddress, parameterName, newType));
+        });
+
         server.createContext("/create_struct", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String name = params.get("name");
