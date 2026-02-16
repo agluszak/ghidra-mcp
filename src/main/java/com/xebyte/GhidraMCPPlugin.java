@@ -55,6 +55,9 @@ import ghidra.program.model.block.CodeBlockReference;
 import ghidra.program.model.block.CodeBlockReferenceIterator;
 
 import com.xebyte.core.BinaryComparisonService;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -169,6 +172,7 @@ public class GhidraMCPPlugin extends Plugin {
     );
 
     private static final AtomicInteger SCRIPT_THREAD_COUNTER = new AtomicInteger(0);
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
     private final Map<String, ScriptJob> scriptJobs = new ConcurrentHashMap<>();
     private final ExecutorService scriptJobExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "GhidraMCP-ScriptJob-" + SCRIPT_THREAD_COUNTER.incrementAndGet());
@@ -5161,22 +5165,28 @@ public class GhidraMCPPlugin extends Plugin {
      */
     private Map<String, String> parsePostParams(HttpExchange exchange) throws IOException {
         byte[] body = exchange.getRequestBody().readAllBytes();
-        String bodyStr = new String(body, StandardCharsets.UTF_8);
-        Map<String, String> params = new HashMap<>();
-        for (String pair : bodyStr.split("&")) {
-            String[] kv = pair.split("=");
-            if (kv.length == 2) {
-                // URL decode parameter values
-                try {
-                    String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
-                    String value = URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
-                    params.put(key, value);
-                } catch (Exception e) {
-                    Msg.error(this, "Error decoding URL parameter", e);
-                }
+        String bodyStr = new String(body, StandardCharsets.UTF_8).trim();
+        if (bodyStr.isEmpty()) {
+            return new HashMap<>();
+        }
+
+        String contentType = "";
+        Headers headers = exchange.getRequestHeaders();
+        if (headers != null) {
+            String headerValue = headers.getFirst("Content-Type");
+            contentType = headerValue != null ? headerValue.toLowerCase(Locale.ROOT) : "";
+        }
+
+        boolean looksLikeJson = contentType.contains("application/json") || bodyStr.startsWith("{");
+        if (looksLikeJson) {
+            try {
+                return parseJsonStringMap(bodyStr);
+            } catch (Exception e) {
+                Msg.warn(this, "Failed to parse JSON body as key/value map, falling back to form parsing: " + e.getMessage());
             }
         }
-        return params;
+
+        return parseUrlEncodedBody(bodyStr);
     }
 
     /**
@@ -5184,218 +5194,23 @@ public class GhidraMCPPlugin extends Plugin {
      */
     private Map<String, Object> parseJsonParams(HttpExchange exchange) throws IOException {
         byte[] body = exchange.getRequestBody().readAllBytes();
-        String bodyStr = new String(body, StandardCharsets.UTF_8);
-        
-        // Simple JSON parsing - this is a basic implementation
-        // In a production environment, you'd want to use a proper JSON library
+        String bodyStr = new String(body, StandardCharsets.UTF_8).trim();
         Map<String, Object> result = new HashMap<>();
-        
-        if (bodyStr.trim().isEmpty()) {
+
+        if (bodyStr.isEmpty()) {
             return result;
         }
-        
+
         try {
-            // Remove outer braces and parse key-value pairs
-            String content = bodyStr.trim();
-            if (content.startsWith("{") && content.endsWith("}")) {
-                content = content.substring(1, content.length() - 1).trim();
-                
-                // Simple parsing - split by commas but handle nested objects/arrays
-                String[] parts = splitJsonPairs(content);
-                
-                for (String part : parts) {
-                    String[] kv = part.split(":", 2);
-                    if (kv.length == 2) {
-                        String key = kv[0].trim().replaceAll("^\"|\"$", "");
-                        String value = kv[1].trim();
-                        
-                        // Handle different value types
-                        if (value.startsWith("\"") && value.endsWith("\"")) {
-                            // String value — unescape JSON escape sequences
-                            result.put(key, unescapeJsonString(value.substring(1, value.length() - 1)));
-                        } else if (value.startsWith("[") && value.endsWith("]")) {
-                            // Array value - parse into List
-                            result.put(key, parseJsonArray(value));
-                        } else if (value.startsWith("{") && value.endsWith("}")) {
-                            // Object value - keep as string for now
-                            result.put(key, value);
-                        } else if (value.matches("\\d+")) {
-                            // Integer value
-                            result.put(key, Integer.parseInt(value));
-                        } else {
-                            // Default to string
-                            result.put(key, value);
-                        }
-                    }
-                }
-            }
+            return JSON_MAPPER.readValue(bodyStr, new TypeReference<Map<String, Object>>() {});
         } catch (Exception e) {
             Msg.error(this, "Error parsing JSON: " + e.getMessage(), e);
-        }
-        
-        return result;
-    }
-    
-    /**
-     * Split JSON content by commas, but respect nested braces and brackets
-     */
-    private String[] splitJsonPairs(String content) {
-        List<String> parts = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        int braceDepth = 0;
-        int bracketDepth = 0;
-        boolean inString = false;
-        boolean escaped = false;
-        
-        for (char c : content.toCharArray()) {
-            if (escaped) {
-                escaped = false;
-                current.append(c);
-                continue;
+            Map<String, String> fallback = parseUrlEncodedBody(bodyStr);
+            if (!fallback.isEmpty()) {
+                result.putAll(fallback);
             }
-            
-            if (c == '\\' && inString) {
-                escaped = true;
-                current.append(c);
-                continue;
-            }
-            
-            if (c == '"') {
-                inString = !inString;
-                current.append(c);
-                continue;
-            }
-            
-            if (!inString) {
-                if (c == '{') braceDepth++;
-                else if (c == '}') braceDepth--;
-                else if (c == '[') bracketDepth++;
-                else if (c == ']') bracketDepth--;
-                else if (c == ',' && braceDepth == 0 && bracketDepth == 0) {
-                    parts.add(current.toString().trim());
-                    current = new StringBuilder();
-                    continue;
-                }
-            }
-            
-            current.append(c);
-        }
-        
-        if (current.length() > 0) {
-            parts.add(current.toString().trim());
-        }
-        
-        return parts.toArray(new String[0]);
-    }
-
-    /**
-     * Parse a JSON array string into a List of Objects (can be Strings or Maps)
-     * Example: "[\"0x6FAC8A58\", \"0x6FAC8A5C\"]" -> List<String>
-     * Example: "[{\"address\": \"0x...\", \"comment\": \"...\"}]" -> List<Map<String, String>>
-     */
-    private List<Object> parseJsonArray(String arrayStr) {
-        List<Object> result = new ArrayList<>();
-
-        if (arrayStr == null || !arrayStr.startsWith("[") || !arrayStr.endsWith("]")) {
             return result;
         }
-
-        // Remove outer brackets
-        String content = arrayStr.substring(1, arrayStr.length() - 1).trim();
-
-        if (content.isEmpty()) {
-            return result;
-        }
-
-        // Split by comma, but respect quoted strings and nested objects/arrays
-        StringBuilder current = new StringBuilder();
-        boolean inString = false;
-        boolean escaped = false;
-        int braceDepth = 0;
-        int bracketDepth = 0;
-
-        for (char c : content.toCharArray()) {
-            if (escaped) {
-                escaped = false;
-                current.append(c);
-                continue;
-            }
-
-            if (c == '\\' && inString) {
-                escaped = true;
-                current.append(c);
-                continue;
-            }
-
-            if (c == '"') {
-                inString = !inString;
-                current.append(c);
-                continue;
-            }
-
-            if (!inString) {
-                if (c == '{') braceDepth++;
-                else if (c == '}') braceDepth--;
-                else if (c == '[') bracketDepth++;
-                else if (c == ']') bracketDepth--;
-                else if (c == ',' && braceDepth == 0 && bracketDepth == 0) {
-                    // End of current element
-                    String element = current.toString().trim();
-                    if (!element.isEmpty()) {
-                        result.add(parseJsonElement(element));
-                    }
-                    current = new StringBuilder();
-                    continue;
-                }
-            }
-
-            current.append(c);
-        }
-
-        // Add last element
-        String element = current.toString().trim();
-        if (!element.isEmpty()) {
-            result.add(parseJsonElement(element));
-        }
-
-        return result;
-    }
-
-    /**
-     * Parse a single JSON element (string, number, object, array, etc.)
-     */
-    private Object parseJsonElement(String element) {
-        element = element.trim();
-
-        // String
-        if (element.startsWith("\"") && element.endsWith("\"")) {
-            return element.substring(1, element.length() - 1);
-        }
-
-        // Object
-        if (element.startsWith("{") && element.endsWith("}")) {
-            return parseJsonObject(element);
-        }
-
-        // Array
-        if (element.startsWith("[") && element.endsWith("]")) {
-            return parseJsonArray(element);
-        }
-
-        // Number
-        if (element.matches("-?\\d+")) {
-            return Integer.parseInt(element);
-        }
-
-        // Boolean
-        if (element.equals("true")) return true;
-        if (element.equals("false")) return false;
-
-        // Null
-        if (element.equals("null")) return null;
-
-        // Default to string
-        return element;
     }
 
     /**
@@ -5403,64 +5218,133 @@ public class GhidraMCPPlugin extends Plugin {
      * Example: "{\"address\": \"0x...\", \"comment\": \"...\"}" -> Map
      */
     private Map<String, String> parseJsonObject(String objectStr) {
-        Map<String, String> result = new HashMap<>();
-
-        if (objectStr == null || !objectStr.startsWith("{") || !objectStr.endsWith("}")) {
-            return result;
+        if (objectStr == null || objectStr.trim().isEmpty()) {
+            return new HashMap<>();
         }
 
-        // Remove outer braces
-        String content = objectStr.substring(1, objectStr.length() - 1).trim();
-
-        if (content.isEmpty()) {
-            return result;
+        try {
+            return parseJsonStringMap(objectStr);
+        } catch (Exception e) {
+            Msg.error(this, "Error parsing JSON object: " + e.getMessage(), e);
+            return new HashMap<>();
         }
-
-        // Split by commas, respecting nested structures
-        String[] pairs = splitJsonPairs(content);
-
-        for (String pair : pairs) {
-            String[] kv = pair.split(":", 2);
-            if (kv.length == 2) {
-                String key = kv[0].trim().replaceAll("^\"|\"$", "");
-                String value = kv[1].trim();
-
-                // Remove quotes from string values
-                if (value.startsWith("\"") && value.endsWith("\"")) {
-                    value = value.substring(1, value.length() - 1);
-                }
-
-                result.put(key, value);
-            }
-        }
-
-        return result;
     }
 
     /**
      * Convert Object (potentially List<Object>) to List<Map<String, String>>
      * Handles the type conversion from parsed JSON arrays of objects
      */
-    @SuppressWarnings("unchecked")
     private List<Map<String, String>> convertToMapList(Object obj) {
         if (obj == null) {
             return null;
         }
 
-        if (obj instanceof List) {
-            List<Object> objList = (List<Object>) obj;
-            List<Map<String, String>> result = new ArrayList<>();
-
-            for (Object item : objList) {
-                if (item instanceof Map) {
-                    result.add((Map<String, String>) item);
-                }
+        List<?> objList;
+        if (obj instanceof List<?>) {
+            objList = (List<?>) obj;
+        } else if (obj instanceof String) {
+            String text = ((String) obj).trim();
+            if (!text.startsWith("[")) {
+                return null;
             }
-
-            return result;
+            try {
+                objList = JSON_MAPPER.readValue(text, new TypeReference<List<Object>>() {});
+            } catch (Exception e) {
+                Msg.error(this, "Error parsing JSON list: " + e.getMessage(), e);
+                return null;
+            }
+        } else {
+            return null;
         }
 
-        return null;
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Object item : objList) {
+            if (item instanceof Map<?, ?>) {
+                result.add(convertObjectMapToStringMap((Map<?, ?>) item));
+                continue;
+            }
+
+            if (item instanceof String) {
+                Map<String, String> parsed = parseJsonObject((String) item);
+                if (!parsed.isEmpty()) {
+                    result.add(parsed);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private Map<String, String> parseJsonStringMap(String jsonBody) throws IOException {
+        JsonNode root = JSON_MAPPER.readTree(jsonBody);
+        if (root == null || !root.isObject()) {
+            return new HashMap<>();
+        }
+
+        Map<String, String> result = new LinkedHashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            result.put(entry.getKey(), jsonNodeToString(entry.getValue()));
+        }
+        return result;
+    }
+
+    private Map<String, String> parseUrlEncodedBody(String bodyStr) {
+        Map<String, String> params = new HashMap<>();
+        for (String pair : bodyStr.split("&")) {
+            String[] kv = pair.split("=", 2);
+            if (kv.length != 2) {
+                continue;
+            }
+            try {
+                String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
+                String value = URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
+                params.put(key, value);
+            } catch (Exception e) {
+                Msg.error(this, "Error decoding URL parameter", e);
+            }
+        }
+        return params;
+    }
+
+    private Map<String, String> convertObjectMapToStringMap(Map<?, ?> map) {
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() == null) {
+                continue;
+            }
+            result.put(entry.getKey().toString(), objectToJsonString(entry.getValue()));
+        }
+        return result;
+    }
+
+    private String jsonNodeToString(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return "";
+        }
+        if (value.isTextual() || value.isNumber() || value.isBoolean()) {
+            return value.asText();
+        }
+        try {
+            return JSON_MAPPER.writeValueAsString(value);
+        } catch (Exception e) {
+            return value.toString();
+        }
+    }
+
+    private String objectToJsonString(Object value) {
+        if (value == null) {
+            return "";
+        }
+        if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+            return String.valueOf(value);
+        }
+        try {
+            return JSON_MAPPER.writeValueAsString(value);
+        } catch (Exception e) {
+            return String.valueOf(value);
+        }
     }
 
     /**
@@ -8277,31 +8161,18 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         try {
-            // Trim and validate JSON array
-            String json = fieldsJson.trim();
-            if (!json.startsWith("[")) {
-                Msg.error(this, "Fields JSON must be an array starting with [, got: " + json.substring(0, Math.min(50, json.length())));
-                return fields;
-            }
-            if (!json.endsWith("]")) {
-                Msg.error(this, "Fields JSON must be an array ending with ]");
+            JsonNode root = JSON_MAPPER.readTree(fieldsJson);
+            if (root == null || !root.isArray()) {
+                Msg.error(this, "Fields JSON must be an array");
                 return fields;
             }
 
-            // Remove outer brackets
-            json = json.substring(1, json.length() - 1).trim();
-
-            // Parse field objects using proper bracket/brace matching
-            List<String> fieldJsons = parseFieldJsonArray(json);
-            Msg.info(this, "Found " + fieldJsons.size() + " field objects to parse");
-
-            for (String fieldJson : fieldJsons) {
-                FieldDefinition field = parseFieldJsonObject(fieldJson);
+            for (JsonNode item : root) {
+                FieldDefinition field = parseFieldDefinitionNode(item);
                 if (field != null && field.name != null && field.type != null) {
                     fields.add(field);
-                    Msg.info(this, "  ✓ Parsed field: " + field.name + " (" + field.type + ")");
                 } else {
-                    Msg.warn(this, "  ✗ Field missing required fields (name/type): " + fieldJson.substring(0, Math.min(50, fieldJson.length())));
+                    Msg.warn(this, "Field missing required fields (name/type): " + item.toString());
                 }
             }
 
@@ -8319,181 +8190,47 @@ public class GhidraMCPPlugin extends Plugin {
         return fields;
     }
 
-    /**
-     * Parse a JSON array string by properly matching braces
-     * Returns list of individual JSON object content strings (without outer braces)
-     */
-    private List<String> parseFieldJsonArray(String json) {
-        List<String> items = new ArrayList<>();
-
-        int braceDepth = 0;
-        int start = -1;
-        boolean inString = false;
-        boolean escapeNext = false;
-
-        for (int i = 0; i < json.length(); i++) {
-            char c = json.charAt(i);
-
-            // Handle escape sequences
-            if (escapeNext) {
-                escapeNext = false;
-                continue;
-            }
-
-            if (c == '\\') {
-                escapeNext = true;
-                continue;
-            }
-
-            // Track if we're inside a string
-            if (c == '"' && !escapeNext) {
-                inString = !inString;
-                continue;
-            }
-
-            // Only count braces outside of strings
-            if (!inString) {
-                if (c == '{') {
-                    if (braceDepth == 0) {
-                        start = i + 1; // Start after the opening brace
-                    }
-                    braceDepth++;
-                } else if (c == '}') {
-                    braceDepth--;
-                    if (braceDepth == 0 && start >= 0) {
-                        // Extract object content (between braces)
-                        String item = json.substring(start, i).trim();
-                        if (!item.isEmpty()) {
-                            items.add(item);
-                        }
-                        start = -1;
-                    }
-                }
-            }
-        }
-
-        return items;
-    }
-
-    /**
-     * Parse a single JSON object string (content between braces) into a FieldDefinition
-     * Format: "name":"fieldname","type":"typename","offset":0
-     */
-    private FieldDefinition parseFieldJsonObject(String objectJson) {
-        if (objectJson == null || objectJson.isEmpty()) {
+    private FieldDefinition parseFieldDefinitionNode(JsonNode node) {
+        if (node == null || node.isNull()) {
             return null;
         }
 
-        String name = null;
-        String type = null;
-        int offset = -1;
-
         try {
-            // Parse key-value pairs while respecting quotes and escapes
-            Map<String, String> keyValues = parseJsonKeyValues(objectJson);
-
-            if (keyValues.containsKey("name")) {
-                name = keyValues.get("name");
-            }
-            if (keyValues.containsKey("type")) {
-                type = keyValues.get("type");
-            }
-            if (keyValues.containsKey("offset")) {
-                try {
-                    offset = Integer.parseInt(keyValues.get("offset"));
-                } catch (NumberFormatException e) {
-                    // Keep offset as -1
-                }
+            JsonNode objectNode = node;
+            if (node.isTextual()) {
+                String encodedObject = node.asText();
+                objectNode = JSON_MAPPER.readTree(encodedObject);
             }
 
+            if (!objectNode.isObject()) {
+                return null;
+            }
+
+            String name = objectNode.path("name").isMissingNode() ? null : objectNode.path("name").asText(null);
+            String type = objectNode.path("type").isMissingNode() ? null : objectNode.path("type").asText(null);
+            int offset = parseOptionalFieldOffset(objectNode.path("offset"));
+            return new FieldDefinition(name, type, offset);
         } catch (Exception e) {
-            Msg.error(this, "Error parsing JSON object: " + e.getMessage());
+            Msg.error(this, "Error parsing field definition JSON: " + e.getMessage());
+            return null;
         }
-
-        return new FieldDefinition(name, type, offset);
     }
 
-    /**
-     * Parse JSON key-value pairs from a string like: "name":"value","type":"typename"
-     * Properly handles quoted strings and escapes
-     */
-    private Map<String, String> parseJsonKeyValues(String json) {
-        Map<String, String> pairs = new LinkedHashMap<>();
-
-        // Find all "key":"value" or "key":value patterns
-        int i = 0;
-        while (i < json.length()) {
-            // Skip whitespace and commas
-            while (i < json.length() && (Character.isWhitespace(json.charAt(i)) || json.charAt(i) == ',')) {
-                i++;
-            }
-
-            if (i >= json.length()) break;
-
-            // Expect opening quote for key
-            if (json.charAt(i) != '"') {
-                i++;
-                continue;
-            }
-
-            // Parse key (quoted string)
-            i++; // Skip opening quote
-            int keyStart = i;
-            boolean escapeNext = false;
-            while (i < json.length()) {
-                char c = json.charAt(i);
-                if (escapeNext) {
-                    escapeNext = false;
-                } else if (c == '\\') {
-                    escapeNext = true;
-                } else if (c == '"') {
-                    break;
-                }
-                i++;
-            }
-            String key = json.substring(keyStart, i).replace("\\\"", "\"");
-            i++; // Skip closing quote
-
-            // Skip whitespace and colon
-            while (i < json.length() && (Character.isWhitespace(json.charAt(i)) || json.charAt(i) == ':')) {
-                i++;
-            }
-
-            if (i >= json.length()) break;
-
-            // Parse value (can be quoted string or number)
-            String value;
-            if (json.charAt(i) == '"') {
-                // Quoted string value
-                i++; // Skip opening quote
-                int valueStart = i;
-                escapeNext = false;
-                while (i < json.length()) {
-                    char c = json.charAt(i);
-                    if (escapeNext) {
-                        escapeNext = false;
-                    } else if (c == '\\') {
-                        escapeNext = true;
-                    } else if (c == '"') {
-                        break;
-                    }
-                    i++;
-                }
-                value = json.substring(valueStart, i).replace("\\\"", "\"");
-                i++; // Skip closing quote
-            } else {
-                // Unquoted value (number, boolean, etc)
-                int valueStart = i;
-                while (i < json.length() && json.charAt(i) != ',' && json.charAt(i) != '}') {
-                    i++;
-                }
-                value = json.substring(valueStart, i).trim();
-            }
-
-            pairs.put(key, value);
+    private int parseOptionalFieldOffset(JsonNode offsetNode) {
+        if (offsetNode == null || offsetNode.isMissingNode() || offsetNode.isNull()) {
+            return -1;
         }
-
-        return pairs;
+        if (offsetNode.canConvertToInt()) {
+            return offsetNode.asInt();
+        }
+        if (offsetNode.isTextual()) {
+            try {
+                return Integer.parseInt(offsetNode.asText().trim());
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -8566,39 +8303,50 @@ public class GhidraMCPPlugin extends Plugin {
      */
     private Map<String, Long> parseValuesJson(String valuesJson) {
         Map<String, Long> values = new LinkedHashMap<>();
-        
+
         try {
-            // Remove outer braces and whitespace
-            String content = valuesJson.trim();
-            if (content.startsWith("{")) {
-                content = content.substring(1);
+            JsonNode root = JSON_MAPPER.readTree(valuesJson);
+            if (root == null || !root.isObject()) {
+                return values;
             }
-            if (content.endsWith("}")) {
-                content = content.substring(0, content.length() - 1);
-            }
-            
-            // Split by commas (simple parsing)
-            String[] pairs = content.split(",");
-            
-            for (String pair : pairs) {
-                String[] keyValue = pair.split(":");
-                if (keyValue.length == 2) {
-                    String key = keyValue[0].trim().replace("\"", "");
-                    String valueStr = keyValue[1].trim();
-                    
-                    try {
-                        Long value = Long.parseLong(valueStr);
-                        values.put(key, value);
-                    } catch (NumberFormatException e) {
-                        // Skip invalid values
-                    }
+
+            Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                Long parsedValue = parseEnumValue(entry.getValue());
+                if (parsedValue != null) {
+                    values.put(entry.getKey(), parsedValue);
                 }
             }
         } catch (Exception e) {
-            // Return empty map on parse error
+            Msg.error(this, "Failed to parse enum values JSON: " + e.getMessage(), e);
         }
-        
+
         return values;
+    }
+
+    private Long parseEnumValue(JsonNode valueNode) {
+        if (valueNode == null || valueNode.isNull()) {
+            return null;
+        }
+        if (valueNode.isIntegralNumber()) {
+            return valueNode.longValue();
+        }
+        if (valueNode.isTextual()) {
+            String text = valueNode.asText().trim();
+            if (text.isEmpty()) {
+                return null;
+            }
+            try {
+                if (text.startsWith("0x") || text.startsWith("0X")) {
+                    return Long.parseUnsignedLong(text.substring(2), 16);
+                }
+                return Long.parseLong(text);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     /**
@@ -8611,11 +8359,14 @@ public class GhidraMCPPlugin extends Plugin {
             if (item instanceof String) {
                 String text = ((String) item).trim();
                 if (text.startsWith("{") && text.endsWith("}")) {
-                    String objectBody = text.substring(1, text.length() - 1);
-                    java.util.Map<String, String> parsed = parseJsonKeyValues(objectBody);
-                    if (!parsed.isEmpty()) {
-                        normalized.add(parsed);
-                        continue;
+                    try {
+                        JsonNode parsed = JSON_MAPPER.readTree(text);
+                        if (parsed != null && parsed.isObject()) {
+                            normalized.add(JSON_MAPPER.convertValue(parsed, new TypeReference<Map<String, Object>>() {}));
+                            continue;
+                        }
+                    } catch (Exception ignored) {
+                        // keep original item if not valid JSON object
                     }
                 }
             }
@@ -8625,55 +8376,24 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     private String serializeListToJson(java.util.List<?> list) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < list.size(); i++) {
-            if (i > 0) sb.append(",");
-            Object item = list.get(i);
-            if (item instanceof String) {
-                sb.append("\"").append(escapeJsonString((String) item)).append("\"");
-            } else if (item instanceof Number) {
-                sb.append(item);
-            } else if (item instanceof java.util.Map) {
-                sb.append(serializeMapToJson((java.util.Map<?, ?>) item));
-            } else if (item instanceof java.util.List) {
-                sb.append(serializeListToJson((java.util.List<?>) item));
-            } else {
-                sb.append("\"").append(escapeJsonString(item.toString())).append("\"");
-            }
+        try {
+            return JSON_MAPPER.writeValueAsString(list);
+        } catch (Exception e) {
+            Msg.error(this, "Failed to serialize list as JSON: " + e.getMessage(), e);
+            return "[]";
         }
-        sb.append("]");
-        return sb.toString();
     }
 
     /**
      * Serialize a Map to proper JSON object
      */
     private String serializeMapToJson(java.util.Map<?, ?> map) {
-        StringBuilder sb = new StringBuilder("{");
-        boolean first = true;
-        for (java.util.Map.Entry<?, ?> entry : map.entrySet()) {
-            if (!first) sb.append(",");
-            first = false;
-            sb.append("\"").append(escapeJsonString(entry.getKey().toString())).append("\":");
-            Object value = entry.getValue();
-            if (value instanceof String) {
-                sb.append("\"").append(escapeJsonString((String) value)).append("\"");
-            } else if (value instanceof Number) {
-                sb.append(value);
-            } else if (value instanceof java.util.Map) {
-                sb.append(serializeMapToJson((java.util.Map<?, ?>) value));
-            } else if (value instanceof java.util.List) {
-                sb.append(serializeListToJson((java.util.List<?>) value));
-            } else if (value instanceof Boolean) {
-                sb.append(value);
-            } else if (value == null) {
-                sb.append("null");
-            } else {
-                sb.append("\"").append(escapeJsonString(value.toString())).append("\"");
-            }
+        try {
+            return JSON_MAPPER.writeValueAsString(map);
+        } catch (Exception e) {
+            Msg.error(this, "Failed to serialize map as JSON: " + e.getMessage(), e);
+            return "{}";
         }
-        sb.append("}");
-        return sb.toString();
     }
 
     /**
@@ -8686,48 +8406,6 @@ public class GhidraMCPPlugin extends Plugin {
                   .replace("\n", "\\n")
                   .replace("\r", "\\r")
                   .replace("\t", "\\t");
-    }
-
-    /**
-     * Unescape JSON string escape sequences: \n → newline, \" → quote, \\ → backslash, etc.
-     */
-    private static String unescapeJsonString(String s) {
-        if (s == null || s.isEmpty()) return s;
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '\\' && i + 1 < s.length()) {
-                char next = s.charAt(i + 1);
-                switch (next) {
-                    case 'n':  sb.append('\n'); i++; break;
-                    case 'r':  sb.append('\r'); i++; break;
-                    case 't':  sb.append('\t'); i++; break;
-                    case '"':  sb.append('"');  i++; break;
-                    case '\\': sb.append('\\'); i++; break;
-                    case '/':  sb.append('/');  i++; break;
-                    case 'u':
-                        // Unicode escape: backslash-u + 4 hex digits
-                        if (i + 5 < s.length()) {
-                            try {
-                                int cp = Integer.parseInt(s.substring(i + 2, i + 6), 16);
-                                sb.append((char) cp);
-                                i += 5;
-                            } catch (NumberFormatException e) {
-                                sb.append(c); // malformed, keep as-is
-                            }
-                        } else {
-                            sb.append(c);
-                        }
-                        break;
-                    default:
-                        sb.append(c); // unknown escape, keep backslash
-                        break;
-                }
-            } else {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
     }
 
     /**

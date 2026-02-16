@@ -15,6 +15,8 @@
  */
 package com.xebyte.headless;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xebyte.core.BinaryComparisonService;
 import com.xebyte.core.ProgramProvider;
 import com.xebyte.core.ThreadingStrategy;
@@ -54,6 +56,7 @@ public class HeadlessEndpointHandler {
     private static final String VERSION = "1.9.4-headless";
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final long SCRIPT_JOB_RETENTION_MS = 60L * 60L * 1000L;
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
     private final ProgramProvider programProvider;
     private final ThreadingStrategy threadingStrategy;
@@ -1937,82 +1940,93 @@ public class HeadlessEndpointHandler {
      * Parse a simple JSON array of field objects.
      */
     private List<Map<String, String>> parseFieldsJson(String json) {
-        List<Map<String, String>> fields = new ArrayList<>();
-
-        json = json.trim();
-        if (!json.startsWith("[") || !json.endsWith("]")) {
-            return fields;
-        }
-
-        json = json.substring(1, json.length() - 1).trim();
-        if (json.isEmpty()) {
-            return fields;
-        }
-
-        // Simple parsing - split by }, {
-        int depth = 0;
-        StringBuilder current = new StringBuilder();
-
-        for (int i = 0; i < json.length(); i++) {
-            char c = json.charAt(i);
-
-            if (c == '{') {
-                depth++;
-                if (depth == 1) {
-                    current = new StringBuilder();
-                    continue;
-                }
-            } else if (c == '}') {
-                depth--;
-                if (depth == 0) {
-                    // Parse the object
-                    Map<String, String> field = parseSimpleJsonObject("{" + current.toString() + "}");
-                    if (!field.isEmpty()) {
-                        fields.add(field);
-                    }
-                    continue;
-                }
-            }
-
-            if (depth > 0) {
-                current.append(c);
-            }
-        }
-
-        return fields;
+        return parseJsonArrayToStringMapList(json);
     }
 
     /**
      * Parse a simple flat JSON object.
      */
     private Map<String, String> parseSimpleJsonObject(String json) {
-        Map<String, String> result = new HashMap<>();
+        return parseStringMapFromJson(json);
+    }
 
-        if (json == null || json.isEmpty()) {
+    private List<Map<String, String>> parseJsonArrayToStringMapList(String json) {
+        List<Map<String, String>> result = new ArrayList<>();
+        if (json == null || json.trim().isEmpty()) {
             return result;
         }
 
-        // Handle stringified JSON objects with escaped quotes, e.g.:
-        // "{\"name\":\"field1\",\"type\":\"int\"}"
-        json = json.replace("\\\"", "\"");
-
-        json = json.trim();
-        if (!json.startsWith("{") || !json.endsWith("}")) {
-            return result;
-        }
-
-        json = json.substring(1, json.length() - 1).trim();
-
-        for (String pair : json.split(",")) {
-            String[] kv = pair.split(":", 2);
-            if (kv.length == 2) {
-                String key = kv[0].trim().replaceAll("^\"|\"$", "");
-                String value = kv[1].trim().replaceAll("^\"|\"$", "");
-                result.put(key, value);
+        try {
+            JsonNode root = JSON_MAPPER.readTree(json);
+            if (root == null || !root.isArray()) {
+                return result;
             }
+
+            for (JsonNode item : root) {
+                Map<String, String> parsed = parseStringMapNode(item);
+                if (!parsed.isEmpty()) {
+                    result.add(parsed);
+                }
+            }
+        } catch (Exception e) {
+            Msg.warn(this, "Failed to parse JSON array payload: " + e.getMessage());
         }
 
         return result;
+    }
+
+    private Map<String, String> parseStringMapFromJson(String json) {
+        if (json == null || json.trim().isEmpty()) {
+            return new HashMap<>();
+        }
+        try {
+            JsonNode root = JSON_MAPPER.readTree(json);
+            return parseStringMapNode(root);
+        } catch (Exception e) {
+            Msg.warn(this, "Failed to parse JSON object payload: " + e.getMessage());
+            return new HashMap<>();
+        }
+    }
+
+    private Map<String, String> parseStringMapNode(JsonNode node) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (node == null || node.isNull()) {
+            return result;
+        }
+
+        JsonNode objectNode = node;
+        if (node.isTextual()) {
+            try {
+                objectNode = JSON_MAPPER.readTree(node.asText());
+            } catch (Exception e) {
+                return result;
+            }
+        }
+
+        if (!objectNode.isObject()) {
+            return result;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            result.put(entry.getKey(), jsonNodeToString(entry.getValue()));
+        }
+        return result;
+    }
+
+    private String jsonNodeToString(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return "";
+        }
+        if (node.isTextual() || node.isNumber() || node.isBoolean()) {
+            return node.asText();
+        }
+        try {
+            return JSON_MAPPER.writeValueAsString(node);
+        } catch (Exception e) {
+            return node.toString();
+        }
     }
 
     /**
@@ -3006,37 +3020,7 @@ public class HeadlessEndpointHandler {
     }
 
     private List<Map<String, String>> parseCommentsList(String json) {
-        List<Map<String, String>> result = new ArrayList<>();
-        if (json == null || json.isEmpty()) return result;
-
-        // Simple JSON array parsing for [{address: "...", comment: "..."}]
-        json = json.trim();
-        if (!json.startsWith("[")) return result;
-
-        // Remove brackets
-        json = json.substring(1, json.length() - 1).trim();
-        if (json.isEmpty()) return result;
-
-        // Split by "}," pattern
-        String[] entries = json.split("\\}\\s*,\\s*\\{");
-        for (String entry : entries) {
-            entry = entry.replace("{", "").replace("}", "").trim();
-            Map<String, String> map = new HashMap<>();
-
-            // Parse key-value pairs
-            for (String pair : entry.split(",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)")) {
-                String[] kv = pair.split(":", 2);
-                if (kv.length == 2) {
-                    String key = kv[0].trim().replace("\"", "");
-                    String value = kv[1].trim().replace("\"", "");
-                    map.put(key, value);
-                }
-            }
-            if (!map.isEmpty()) {
-                result.add(map);
-            }
-        }
-        return result;
+        return parseJsonArrayToStringMapList(json);
     }
 
     private List<Map<String, String>> parseLabelsList(String json) {
@@ -3046,24 +3030,33 @@ public class HeadlessEndpointHandler {
 
     private List<String> parseStringArray(String json) {
         List<String> result = new ArrayList<>();
-        if (json == null || json.isEmpty()) return result;
-
-        json = json.trim();
-        if (!json.startsWith("[")) return result;
-
-        // Remove brackets
-        json = json.substring(1, json.length() - 1).trim();
-        if (json.isEmpty()) return result;
-
-        // Split by comma
-        String[] items = json.split(",");
-        for (String item : items) {
-            item = item.trim().replace("\"", "");
-            if (!item.isEmpty()) {
-                result.add(item);
-            }
+        if (json == null || json.trim().isEmpty()) {
+            return result;
         }
-        return result;
+
+        try {
+            JsonNode root = JSON_MAPPER.readTree(json);
+            if (root == null || !root.isArray()) {
+                return result;
+            }
+            for (JsonNode item : root) {
+                if (item == null || item.isNull()) {
+                    continue;
+                }
+                if (item.isTextual()) {
+                    String text = item.asText().trim();
+                    if (!text.isEmpty()) {
+                        result.add(text);
+                    }
+                } else {
+                    result.add(item.asText());
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            Msg.warn(this, "Failed to parse string array JSON: " + e.getMessage());
+            return result;
+        }
     }
 
     // ==========================================================================
@@ -3761,32 +3754,21 @@ public class HeadlessEndpointHandler {
         Map<String, Long> values = new LinkedHashMap<>();
 
         try {
-            String content = valuesJson.trim();
-            if (content.startsWith("{")) {
-                content = content.substring(1);
-            }
-            if (content.endsWith("}")) {
-                content = content.substring(0, content.length() - 1);
+            JsonNode root = JSON_MAPPER.readTree(valuesJson);
+            if (root == null || !root.isObject()) {
+                return values;
             }
 
-            String[] pairs = content.split(",");
-
-            for (String pair : pairs) {
-                String[] keyValue = pair.split(":");
-                if (keyValue.length == 2) {
-                    String key = keyValue[0].trim().replace("\"", "");
-                    String valueStr = keyValue[1].trim();
-
-                    try {
-                        Long value = Long.parseLong(valueStr);
-                        values.put(key, value);
-                    } catch (NumberFormatException e) {
-                        // Skip invalid values
-                    }
+            Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                Long parsedValue = parseLongNode(entry.getValue());
+                if (parsedValue != null) {
+                    values.put(entry.getKey(), parsedValue);
                 }
             }
         } catch (Exception e) {
-            // Return empty map on parse error
+            Msg.warn(this, "Failed to parse enum values JSON: " + e.getMessage());
         }
 
         return values;
@@ -3796,33 +3778,31 @@ public class HeadlessEndpointHandler {
      * Parse fields list from JSON format [{"name": "...", "type": "..."}, ...]
      */
     private List<Map<String, String>> parseFieldsList(String json) {
-        List<Map<String, String>> result = new ArrayList<>();
-        if (json == null || json.isEmpty()) return result;
+        return parseJsonArrayToStringMapList(json);
+    }
 
-        json = json.trim();
-        if (!json.startsWith("[")) return result;
-
-        json = json.substring(1, json.length() - 1).trim();
-        if (json.isEmpty()) return result;
-
-        String[] entries = json.split("\\}\\s*,\\s*\\{");
-        for (String entry : entries) {
-            entry = entry.replace("{", "").replace("}", "").trim();
-            Map<String, String> map = new HashMap<>();
-
-            for (String pair : entry.split(",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)")) {
-                String[] kv = pair.split(":", 2);
-                if (kv.length == 2) {
-                    String key = kv[0].trim().replace("\"", "");
-                    String value = kv[1].trim().replace("\"", "");
-                    map.put(key, value);
-                }
+    private Long parseLongNode(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isIntegralNumber()) {
+            return node.longValue();
+        }
+        if (node.isTextual()) {
+            String text = node.asText().trim();
+            if (text.isEmpty()) {
+                return null;
             }
-            if (!map.isEmpty()) {
-                result.add(map);
+            try {
+                if (text.startsWith("0x") || text.startsWith("0X")) {
+                    return Long.parseUnsignedLong(text.substring(2), 16);
+                }
+                return Long.parseLong(text);
+            } catch (NumberFormatException ignored) {
+                return null;
             }
         }
-        return result;
+        return null;
     }
 
     /**

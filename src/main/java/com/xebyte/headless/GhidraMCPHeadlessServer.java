@@ -15,6 +15,8 @@
  */
 package com.xebyte.headless;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.xebyte.core.ProgramProvider;
@@ -51,6 +53,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
 
     private static final String VERSION = "1.9.4-headless";
     private static final int DEFAULT_PORT = 8089;
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
     private HttpServer server;
     private HeadlessProgramProvider programProvider;
@@ -1107,15 +1110,11 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
     }
 
     private Map<String, String> parsePostParams(HttpExchange exchange) throws IOException {
-        Map<String, String> params = new HashMap<>();
-
-        // Get content type
         String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
         if (contentType == null) {
             contentType = "";
         }
 
-        // Read body
         String body;
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8))) {
@@ -1124,45 +1123,71 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
             while ((line = reader.readLine()) != null) {
                 sb.append(line);
             }
-            body = sb.toString();
+            body = sb.toString().trim();
         }
 
         if (body.isEmpty()) {
-            return params;
+            return new HashMap<>();
         }
 
-        // Parse based on content type
-        if (contentType.contains("application/json")) {
-            // Simple JSON parsing for flat objects
-            body = body.trim();
-            if (body.startsWith("{") && body.endsWith("}")) {
-                body = body.substring(1, body.length() - 1);
-                for (String pair : body.split(",")) {
-                    String[] kv = pair.split(":", 2);
-                    if (kv.length == 2) {
-                        String key = kv[0].trim().replaceAll("^\"|\"$", "");
-                        String value = kv[1].trim().replaceAll("^\"|\"$", "");
-                        params.put(key, value);
-                    }
-                }
-            }
-        } else {
-            // Form-urlencoded
-            for (String param : body.split("&")) {
-                String[] pair = param.split("=", 2);
-                if (pair.length == 2) {
-                    try {
-                        String key = URLDecoder.decode(pair[0], StandardCharsets.UTF_8);
-                        String value = URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
-                        params.put(key, value);
-                    } catch (Exception e) {
-                        // Skip malformed param
-                    }
-                }
+        boolean looksLikeJson = contentType.toLowerCase(Locale.ROOT).contains("application/json")
+            || body.startsWith("{");
+        if (looksLikeJson) {
+            try {
+                return parseJsonStringMap(body);
+            } catch (Exception e) {
+                Msg.warn(this, "Failed to parse JSON body as key/value map, falling back to form parsing: " + e.getMessage());
             }
         }
 
+        return parseUrlEncodedBody(body);
+    }
+
+    private Map<String, String> parseUrlEncodedBody(String body) {
+        Map<String, String> params = new HashMap<>();
+        for (String param : body.split("&")) {
+            String[] pair = param.split("=", 2);
+            if (pair.length != 2) {
+                continue;
+            }
+            try {
+                String key = URLDecoder.decode(pair[0], StandardCharsets.UTF_8);
+                String value = URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
+                params.put(key, value);
+            } catch (Exception ignored) {
+                // Skip malformed param
+            }
+        }
         return params;
+    }
+
+    private Map<String, String> parseJsonStringMap(String body) throws IOException {
+        JsonNode root = JSON_MAPPER.readTree(body);
+        if (root == null || !root.isObject()) {
+            return new HashMap<>();
+        }
+
+        Map<String, String> params = new LinkedHashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            params.put(entry.getKey(), jsonNodeToString(entry.getValue()));
+        }
+        return params;
+    }
+
+    private String jsonNodeToString(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return "";
+        }
+        if (node.isTextual() || node.isNumber() || node.isBoolean()) {
+            return node.asText();
+        }
+        try {
+            return JSON_MAPPER.writeValueAsString(node);
+        } catch (Exception e) {
+            return node.toString();
+        }
     }
 
     private int parseIntOrDefault(String value, int defaultValue) {
