@@ -104,6 +104,7 @@ logs/*
 # Runtime and temporary files
 *.tmp
 *.temp
+AI_TODO.md
 *.swp
 *.swo
 *~
